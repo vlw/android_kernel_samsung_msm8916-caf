@@ -32,6 +32,7 @@
 #include <linux/debugfs.h>
 #include <linux/rbtree.h>
 #include <linux/sched.h>
+#include <linux/sched/rt.h>
 #include <linux/seq_file.h>
 #include <linux/uaccess.h>
 #include <linux/vmalloc.h>
@@ -269,6 +270,8 @@ struct binder_node {
 	unsigned accept_fds:1;
 	unsigned txn_security_ctx:1;
 	unsigned min_priority:8;
+	unsigned sched_policy:2;
+	unsigned inherit_rt:1;
 	struct list_head async_todo;
 };
 
@@ -318,6 +321,12 @@ enum binder_deferred_state {
 	BINDER_DEFERRED_RELEASE      = 0x04,
 };
 
+/* Android common policy + internal scheduler priority representation. */
+struct binder_priority {
+	unsigned int sched_policy;
+	int prio;
+};
+
 struct binder_proc {
 	struct hlist_node proc_node;
 	struct rb_root threads;
@@ -350,7 +359,7 @@ struct binder_proc {
 	int requested_threads;
 	int requested_threads_started;
 	int ready_threads;
-	long default_priority;
+	struct binder_priority default_priority;
 	struct dentry *debugfs_entry;
 	struct binder_context *context;
 };
@@ -377,6 +386,7 @@ struct binder_thread {
 		/* we are also waiting on */
 	wait_queue_head_t wait;
 	struct binder_stats stats;
+	struct task_struct *task;
 };
 
 struct binder_transaction {
@@ -393,8 +403,9 @@ struct binder_transaction {
 	struct binder_buffer *buffer;
 	unsigned int	code;
 	unsigned int	flags;
-	long	priority;
-	long	saved_priority;
+	struct binder_priority priority;
+	struct binder_priority saved_priority;
+	bool set_priority_called;
 	kuid_t	sender_euid;
 	binder_uintptr_t security_ctx;
 };
@@ -464,22 +475,145 @@ static inline void binder_unlock(const char *tag)
 	mutex_unlock(&binder_main_lock);
 }
 
-static void binder_set_nice(long nice)
+static bool is_rt_policy(int policy)
 {
-	long min_nice;
+	return policy == SCHED_FIFO || policy == SCHED_RR;
+}
 
-	if (can_nice(current, nice)) {
-		set_user_nice(current, nice);
+static bool is_fair_policy(int policy)
+{
+	return policy == SCHED_NORMAL || policy == SCHED_BATCH;
+}
+
+static bool binder_supported_policy(int policy)
+{
+	return is_fair_policy(policy) || is_rt_policy(policy);
+}
+
+static int to_userspace_prio(int policy, int kernel_priority)
+{
+	if (is_fair_policy(policy))
+		return (kernel_priority - DEFAULT_PRIO);
+	else
+		return MAX_USER_RT_PRIO - 1 - kernel_priority;
+}
+
+static int to_kernel_prio(int policy, int user_priority)
+{
+	if (is_fair_policy(policy))
+		return (user_priority + DEFAULT_PRIO);
+	else
+		return MAX_USER_RT_PRIO - 1 - user_priority;
+}
+
+static void binder_do_set_priority(struct task_struct *task,
+				   struct binder_priority desired,
+				   bool verify)
+{
+	int priority; /* user-space prio value */
+	bool has_cap_nice;
+	unsigned int policy = desired.sched_policy;
+
+	if (task->policy == policy && task->normal_prio == desired.prio)
 		return;
+
+	has_cap_nice = has_capability_noaudit(task, CAP_SYS_NICE);
+
+	priority = to_userspace_prio(policy, desired.prio);
+
+	if (verify && is_rt_policy(policy) && !has_cap_nice) {
+		long max_rtprio = task_rlimit(task, RLIMIT_RTPRIO);
+
+		if (max_rtprio == 0) {
+			policy = SCHED_NORMAL;
+			priority = -20;
+		} else if (priority > max_rtprio) {
+			priority = max_rtprio;
+		}
 	}
-	min_nice = 20 - current->signal->rlim[RLIMIT_NICE].rlim_cur;
-	binder_debug(BINDER_DEBUG_PRIORITY_CAP,
-		     "%d: nice value %ld not allowed use %ld instead\n",
-		      current->pid, nice, min_nice);
-	set_user_nice(current, min_nice);
-	if (min_nice < 20)
+
+	if (verify && is_fair_policy(policy) && !has_cap_nice) {
+		long min_nice = 20 - task_rlimit(task, RLIMIT_NICE);
+
+		if (min_nice > 19) {
+			binder_user_error("%d RLIMIT_NICE not set\n",
+					  task->pid);
+			return;
+		} else if (priority < min_nice) {
+			priority = min_nice;
+		}
+	}
+
+	if (policy != desired.sched_policy ||
+	    to_kernel_prio(policy, priority) != desired.prio)
+		binder_debug(BINDER_DEBUG_PRIORITY_CAP,
+			     "%d: priority %d not allowed, using %d instead\n",
+			      task->pid, desired.prio,
+			      to_kernel_prio(policy, priority));
+
+	trace_binder_set_priority(task->tgid, task->pid, task->normal_prio,
+				  to_kernel_prio(policy, priority),
+				  desired.prio);
+
+	/* Set the actual priority */
+	if (task->policy != policy || is_rt_policy(policy)) {
+		struct sched_param params;
+
+		params.sched_priority = is_rt_policy(policy) ? priority : 0;
+
+		sched_setscheduler_nocheck(task,
+					   policy | SCHED_RESET_ON_FORK,
+					   &params);
+	}
+	if (is_fair_policy(policy))
+		set_user_nice(task, priority);
+}
+
+static void binder_set_priority(struct task_struct *task,
+				struct binder_priority desired)
+{
+	binder_do_set_priority(task, desired, /* verify = */ true);
+}
+
+static void binder_restore_priority(struct task_struct *task,
+				    struct binder_priority desired)
+{
+	binder_do_set_priority(task, desired, /* verify = */ false);
+}
+
+static void binder_transaction_priority(struct task_struct *task,
+					struct binder_transaction *t,
+					struct binder_priority node_prio,
+					bool inherit_rt)
+{
+	struct binder_priority desired_prio = t->priority;
+
+	if (t->set_priority_called)
 		return;
-	binder_user_error("%d RLIMIT_NICE not set\n", current->pid);
+
+	t->set_priority_called = true;
+	t->saved_priority.sched_policy = task->policy;
+	t->saved_priority.prio = task->normal_prio;
+
+	if (!inherit_rt && is_rt_policy(desired_prio.sched_policy)) {
+		desired_prio.prio = DEFAULT_PRIO;
+		desired_prio.sched_policy = SCHED_NORMAL;
+	}
+
+	if (node_prio.prio < desired_prio.prio ||
+	    (node_prio.prio == desired_prio.prio &&
+	     node_prio.sched_policy == SCHED_FIFO)) {
+		/*
+		 * In case the minimum priority on the node is
+		 * higher (lower value), use that priority. If
+		 * the priority is the same, but the node uses
+		 * SCHED_FIFO, prefer SCHED_FIFO, since it can
+		 * run unbounded, unlike SCHED_RR.
+		 */
+		desired_prio = node_prio;
+	}
+
+	binder_set_priority(task, desired_prio);
 }
 
 static struct binder_buffer *binder_buffer_next(struct binder_buffer *buffer)
@@ -966,6 +1100,7 @@ static struct binder_node *binder_new_node(struct binder_proc *proc,
 	binder_uintptr_t ptr = fp ? fp->binder : 0;
 	binder_uintptr_t cookie = fp ? fp->cookie : 0;
 	__u32 flags = fp ? fp->flags : 0;
+	s8 priority = flags & FLAT_BINDER_FLAG_PRIORITY_MASK;
 
 	while (*p) {
 		parent = *p;
@@ -990,6 +1125,11 @@ static struct binder_node *binder_new_node(struct binder_proc *proc,
 	node->ptr = ptr;
 	node->cookie = cookie;
 	node->work.type = BINDER_WORK_NODE;
+	node->sched_policy = (flags & FLAT_BINDER_FLAG_SCHED_POLICY_MASK) >>
+		FLAT_BINDER_FLAG_SCHED_POLICY_SHIFT;
+	node->min_priority = to_kernel_prio(node->sched_policy, priority);
+	node->inherit_rt = !!(flags & FLAT_BINDER_FLAG_INHERIT_RT);
+	node->accept_fds = !!(flags & FLAT_BINDER_FLAG_ACCEPTS_FDS);
 	node->txn_security_ctx = !!(flags & FLAT_BINDER_FLAG_TXN_SECURITY_CTX);
 	INIT_LIST_HEAD(&node->work.entry);
 	INIT_LIST_HEAD(&node->async_todo);
@@ -1618,8 +1758,6 @@ static int binder_translate_binder(struct flat_binder_object *fp,
 		if (!node)
 			return -ENOMEM;
 
-		node->min_priority = fp->flags & FLAT_BINDER_FLAG_PRIORITY_MASK;
-		node->accept_fds = !!(fp->flags & FLAT_BINDER_FLAG_ACCEPTS_FDS);
 	}
 	if (fp->cookie != node->cookie) {
 		binder_user_error("%d:%d sending u%016llx node %d, cookie mismatch %016llx != %016llx\n",
@@ -1910,7 +2048,6 @@ static void binder_transaction(struct binder_proc *proc,
 			return_error = BR_FAILED_REPLY;
 			goto err_empty_call_stack;
 		}
-		binder_set_nice(in_reply_to->saved_priority);
 		if (in_reply_to->to_thread != thread) {
 			binder_user_error("%d:%d got reply transaction with bad transaction stack, transaction %d has target %d:%d\n",
 				proc->pid, thread->pid, in_reply_to->debug_id,
@@ -1935,6 +2072,7 @@ static void binder_transaction(struct binder_proc *proc,
 				target_thread->transaction_stack->debug_id : 0,
 				in_reply_to->debug_id);
 			return_error = BR_FAILED_REPLY;
+			binder_restore_priority(current, in_reply_to->saved_priority);
 			in_reply_to = NULL;
 			target_thread = NULL;
 			goto err_dead_binder;
@@ -2045,7 +2183,14 @@ static void binder_transaction(struct binder_proc *proc,
 	t->to_thread = target_thread;
 	t->code = tr->code;
 	t->flags = tr->flags;
-	t->priority = task_nice(current);
+	if (!(t->flags & TF_ONE_WAY) &&
+	    binder_supported_policy(current->policy)) {
+		t->priority.sched_policy = current->policy;
+		t->priority.prio = current->normal_prio;
+	} else {
+		/* Async calls do not inherit the sender's scheduling policy. */
+		t->priority = target_proc->default_priority;
+	}
 
 	if (target_node && target_node->txn_security_ctx) {
 		u32 secid;
@@ -2253,6 +2398,7 @@ static void binder_transaction(struct binder_proc *proc,
 	}
 	if (reply) {
 		BUG_ON(t->buffer->async_transaction != 0);
+		binder_restore_priority(current, in_reply_to->saved_priority);
 		binder_pop_transaction(target_thread, in_reply_to);
 	} else if (!(t->flags & TF_ONE_WAY)) {
 		BUG_ON(t->buffer->async_transaction != 0);
@@ -2267,6 +2413,15 @@ static void binder_transaction(struct binder_proc *proc,
 			target_wait = NULL;
 		} else
 			target_node->has_async_transaction = 1;
+	}
+	if (!reply && target_thread) {
+		struct binder_priority node_prio = {
+			.sched_policy = target_node->sched_policy,
+			.prio = target_node->min_priority,
+		};
+
+		binder_transaction_priority(target_thread->task, t, node_prio,
+					    target_node->inherit_rt);
 	}
 	t->work.type = BINDER_WORK_TRANSACTION;
 	list_add_tail(&t->work.entry, target_list);
@@ -2322,6 +2477,7 @@ err_no_context_mgr_node:
 
 	BUG_ON(thread->return_error != BR_OK);
 	if (in_reply_to) {
+		binder_restore_priority(current, in_reply_to->saved_priority);
 		thread->return_error = BR_TRANSACTION_COMPLETE;
 		binder_send_failed_reply(in_reply_to, return_error);
 	} else
@@ -2795,7 +2951,7 @@ retry:
 			wait_event_interruptible(binder_user_error_wait,
 						 binder_stop_on_user_error < 2);
 		}
-		binder_set_nice(proc->default_priority);
+		binder_restore_priority(current, proc->default_priority);
 		if (non_block) {
 			if (!binder_has_proc_work(proc, thread))
 				ret = -EAGAIN;
@@ -2970,13 +3126,15 @@ retry:
 
 			trd->target.ptr = target_node->ptr;
 			trd->cookie =  target_node->cookie;
-			t->saved_priority = task_nice(current);
-			if (t->priority < target_node->min_priority &&
-			    !(t->flags & TF_ONE_WAY))
-				binder_set_nice(t->priority);
-			else if (!(t->flags & TF_ONE_WAY) ||
-				 t->saved_priority > target_node->min_priority)
-				binder_set_nice(target_node->min_priority);
+			{
+				struct binder_priority node_prio = {
+					.sched_policy = target_node->sched_policy,
+					.prio = target_node->min_priority,
+				};
+
+				binder_transaction_priority(current, t, node_prio,
+							    target_node->inherit_rt);
+			}
 			cmd = BR_TRANSACTION;
 		} else {
 			trd->target.ptr = 0;
@@ -3139,6 +3297,8 @@ static struct binder_thread *binder_get_thread(struct binder_proc *proc)
 		binder_stats_created(BINDER_STAT_THREAD);
 		thread->proc = proc;
 		thread->pid = current->pid;
+		get_task_struct(current);
+		thread->task = current;
 		init_waitqueue_head(&thread->wait);
 		INIT_LIST_HEAD(&thread->todo);
 		rb_link_node(&thread->rb_node, parent, p);
@@ -3186,6 +3346,7 @@ static int binder_free_thread(struct binder_proc *proc,
 	if (send_reply)
 		binder_send_failed_reply(send_reply, BR_DEAD_REPLY);
 	binder_release_work(&thread->todo);
+	put_task_struct(thread->task);
 	kfree(thread);
 	binder_stats_deleted(BINDER_STAT_THREAD);
 	return active_transactions;
@@ -3574,7 +3735,13 @@ static int binder_open(struct inode *nodp, struct file *filp)
 	proc->tsk = current->group_leader;
 	INIT_LIST_HEAD(&proc->todo);
 	init_waitqueue_head(&proc->wait);
-	proc->default_priority = task_nice(current);
+	if (binder_supported_policy(current->policy)) {
+		proc->default_priority.sched_policy = current->policy;
+		proc->default_priority.prio = current->normal_prio;
+	} else {
+		proc->default_priority.sched_policy = SCHED_NORMAL;
+		proc->default_priority.prio = DEFAULT_PRIO;
+	}
 	binder_dev = container_of(filp->private_data, struct binder_device,
 				  miscdev);
 	proc->context = &binder_dev->context;
@@ -3869,13 +4036,14 @@ static void print_binder_transaction(struct seq_file *m, const char *prefix,
 				     struct binder_transaction *t)
 {
 	seq_printf(m,
-		   "%s %d: %pK from %d:%d to %d:%d code %x flags %x pri %ld r%d",
+		   "%s %d: %pK from %d:%d to %d:%d code %x flags %x pri %d:%d r%d",
 		   prefix, t->debug_id, t,
 		   t->from ? t->from->proc->pid : 0,
 		   t->from ? t->from->pid : 0,
 		   t->to_proc ? t->to_proc->pid : 0,
 		   t->to_thread ? t->to_thread->pid : 0,
-		   t->code, t->flags, t->priority, t->need_reply);
+		   t->code, t->flags, t->priority.sched_policy,
+		   t->priority.prio, t->need_reply);
 	if (t->buffer == NULL) {
 		seq_puts(m, " buffer free\n");
 		return;

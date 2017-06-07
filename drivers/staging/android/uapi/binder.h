@@ -36,9 +36,18 @@ enum {
 	BINDER_TYPE_PTR		= B_PACK_CHARS('p', 't', '*', B_TYPE_LARGE),
 };
 
+enum flat_binder_object_shifts {
+	FLAT_BINDER_FLAG_SCHED_POLICY_SHIFT = 9,
+};
+
 enum {
 	FLAT_BINDER_FLAG_PRIORITY_MASK = 0xff,
 	FLAT_BINDER_FLAG_ACCEPTS_FDS = 0x100,
+	/* 00 NORMAL, 01 FIFO, 10 RR, 11 BATCH; low byte is nice/RT priority. */
+	FLAT_BINDER_FLAG_SCHED_POLICY_MASK =
+		3U << FLAT_BINDER_FLAG_SCHED_POLICY_SHIFT,
+	/* Opt in to inheriting a synchronous caller's RT policy. */
+	FLAT_BINDER_FLAG_INHERIT_RT = 0x800,
 
 	/**
 	 * @FLAT_BINDER_FLAG_TXN_SECURITY_CTX: request security contexts
