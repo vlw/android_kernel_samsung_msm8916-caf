@@ -2627,12 +2627,8 @@ static int binder_thread_write(struct binder_proc *proc,
 				ref->death = death;
 				if (ref->node->proc == NULL) {
 					ref->death->work.type = BINDER_WORK_DEAD_BINDER;
-					if (thread->looper & (BINDER_LOOPER_STATE_REGISTERED | BINDER_LOOPER_STATE_ENTERED)) {
-						list_add_tail(&ref->death->work.entry, &thread->todo);
-					} else {
-						list_add_tail(&ref->death->work.entry, &proc->todo);
-						wake_up_interruptible(&proc->wait);
-					}
+					list_add_tail(&ref->death->work.entry, &proc->todo);
+					wake_up_interruptible(&proc->wait);
 				}
 			} else {
 				if (ref->death == NULL) {
