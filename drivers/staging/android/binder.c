@@ -3206,14 +3206,11 @@ static unsigned int binder_poll(struct file *filp,
 	binder_unlock(__func__);
 
 	if (wait_for_proc_work) {
-		if (binder_has_proc_work(proc, thread))
-			return POLLIN;
+		/* epoll may only supply a registration callback on this call. */
 		poll_wait(filp, &proc->wait, wait);
 		if (binder_has_proc_work(proc, thread))
 			return POLLIN;
 	} else {
-		if (binder_has_thread_work(thread))
-			return POLLIN;
 		poll_wait(filp, &thread->wait, wait);
 		if (binder_has_thread_work(thread))
 			return POLLIN;
