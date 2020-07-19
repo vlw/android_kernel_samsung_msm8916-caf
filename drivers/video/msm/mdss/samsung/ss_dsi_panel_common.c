@@ -914,6 +914,8 @@ int mdss_samsung_panel_on_pre(struct mdss_panel_data *pdata)
 {
 	int ndx;
 	struct mdss_dsi_ctrl_pdata *ctrl = NULL;
+	bool isDdiIdEmpty = true;
+	int ll = 0;
 	struct samsung_display_driver_data *vdd =
 			(struct samsung_display_driver_data *)pdata->panel_private;
 
@@ -1008,6 +1010,19 @@ int mdss_samsung_panel_on_pre(struct mdss_panel_data *pdata)
 		else
 			vdd->ddi_id_loaded_dsi[ndx] = vdd->panel_func.samsung_ddi_id_read(ctrl);
 	}
+
+	pr_err("%s vlw_display_debug: DSI%d ddi_id_dsi : %02x %02x %02x %02x %02x\n", __func__, ndx,
+			vdd->ddi_id_dsi[ndx][0], vdd->ddi_id_dsi[ndx][1],
+			vdd->ddi_id_dsi[ndx][2], vdd->ddi_id_dsi[ndx][3],
+			vdd->ddi_id_dsi[ndx][4]);
+	for (ll = 0; ll<5; ll++) {
+		if (vdd->ddi_id_dsi[ndx][ll] != 0)
+			isDdiIdEmpty = false;
+	}
+	pr_info("%s: vlw_display_debug: Using panel type %s\n", __func__,
+		isDdiIdEmpty ? "IPS" : "AMOLED");
+	// For future: AMOLED panels support up to 100Hz Refresh Rate,
+	// but if used IPS panel, it will blank if Refresh Rate != 60
 
 	/* HBM */
 	if (!vdd->hbm_loaded_dsi[ndx]) {
