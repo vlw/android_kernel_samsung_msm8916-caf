@@ -16,8 +16,8 @@
  */
 
 
-#define TSP_VERBOSE_DEBUG
-#define SEC_FACTORY_TEST
+//#define TSP_VERBOSE_DEBUG
+//#define SEC_FACTORY_TEST
 
 #include <linux/module.h>
 #include <linux/input.h>
@@ -66,7 +66,7 @@ u8 m_FirmwareIdx = 0;
 
 extern char *saved_command_line;
 
-#define ZINITIX_DEBUG			1
+#define ZINITIX_DEBUG			0
 
 #ifdef TOUCH_POINT_FLAG
 #define TOUCH_POINT_MODE		1
@@ -78,13 +78,13 @@ extern char *saved_command_line;
 #endif
 #endif
 
-#define MAX_SUPPORTED_FINGER_NUM	5 /* max 10 */
+#define MAX_SUPPORTED_FINGER_NUM	10 /* max 10 */
 
-#ifdef TOUCH_BOOSTER_DVFS
+//#ifdef TOUCH_BOOSTER_DVFS
 #define TOUCH_BOOSTER_OFF_TIME	500
 #define TOUCH_BOOSTER_CHG_TIME	130
 #define SECOND_MINLOCK_FOR_LEVEL1
-#endif
+//#endif
 
 #ifdef SUPPORTED_TOUCH_KEY
 #define NOT_SUPPORTED_TOUCH_DUMMY_KEY
@@ -147,7 +147,7 @@ enum key_event {
 	(MAX_RAW_DATA_SZ + 4*MAX_SUPPORTED_FINGER_NUM + 2)
 /* preriod raw data interval */
 
-#define RAWDATA_DELAY_FOR_HOST		100
+#define RAWDATA_DELAY_FOR_HOST		85
 
 struct raw_ioctl {
 	int sz;
@@ -786,6 +786,7 @@ static void bt541_set_optional_mode(struct bt541_ts_info *info, bool force)
 }
 
 #define I2C_BUFFER_SIZE 64
+#ifdef SEC_FACTORY_TEST
 static bool get_raw_data(struct bt541_ts_info *info, u8 *buff, int skip_cnt)
 {
 	struct i2c_client *client = info->client;
@@ -846,6 +847,7 @@ static bool get_raw_data(struct bt541_ts_info *info, u8 *buff, int skip_cnt)
 
 	return true;
 }
+#endif
 
 static bool ts_get_raw_data(struct bt541_ts_info *info)
 {
