@@ -129,7 +129,7 @@
 		qcom,mdss-dsi-stream = <0>;
 		qcom,mdss-dsi-mdp-trigger = "none";
 		qcom,mdss-dsi-dma-trigger = "trigger_sw";
-		qcom,mdss-dsi-panel-framerate = <90>;
+		qcom,mdss-dsi-panel-framerate = <60>;
 		/*qcom,mdss-dsi-panel-clockrate */
 		qcom,mdss-dsi-on-command-state = "dsi_lp_mode";
 		qcom,mdss-dsi-off-command-state = "dsi_hs_mode";
