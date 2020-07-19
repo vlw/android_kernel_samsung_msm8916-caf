@@ -420,7 +420,7 @@ config SEC_A3_PROJECT
           Support for Samsung A3 Project
 
 config MACH_A3U_EUR_OPEN
-    depends on SEC_A3_PROJECT
+    depends on SEC_A3_PROJECT || SEC_A3_EUR_PROJECT
         default n
         bool "Samsung A3U EUR Open"
         help
@@ -448,7 +448,7 @@ config SEC_A33G_EUR_PROJECT
 	  Support for Samsung A33G EUR Project
 
 config MACH_A33G_EUR_OPEN
-	depends on SEC_A33G_EUR_PROJECT
+	depends on SEC_A33G_EUR_PROJECT || SEC_A3_EUR_PROJECT
 	default n
 	bool "Samsung A33G EUR Open"
 	help

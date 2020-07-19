@@ -223,20 +223,14 @@ ifeq ($(CONFIG_SEC_E5_PROJECT),y)
 	endif
 endif
 
-ifeq ($(CONFIG_SEC_A3_PROJECT),y)
+ifeq ($(CONFIG_SEC_A3_EUR_PROJECT),y)
 	ifeq ($(CONFIG_MACH_A3U_EUR_OPEN),y)
 		dtb-y += msm8916-sec-a3u-eur-r01.dtb
 	endif
-endif
-
-ifeq ($(CONFIG_SEC_A3_EUR_PROJECT),y)
 	ifeq ($(CONFIG_MACH_A3_EUR_OPEN),y)
 		dtb-y += msm8916-sec-a3-eur-r00.dtb
 		dtb-y += msm8916-sec-a3-eur-r01.dtb
 	endif
-endif
-
-ifeq ($(CONFIG_SEC_A33G_EUR_PROJECT),y)
 	ifeq ($(CONFIG_MACH_A33G_EUR_OPEN),y)
 		dtb-y += msm8916-sec-a33g-eur-r00.dtb
 		dtb-y += msm8916-sec-a33g-eur-r01.dtb
