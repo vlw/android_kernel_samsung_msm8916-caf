@@ -49,6 +49,11 @@
 
 #include "zinitix_bt541_ts.h"
 
+#ifdef CONFIG_FB
+#include <linux/notifier.h>
+#include <linux/fb.h>
+#endif
+
 #if defined(CONFIG_TOUCH_DISABLER)
 #include <linux/input/touch_disabler.h>
 #endif
@@ -562,6 +567,9 @@ struct bt541_ts_info {
 	struct tsp_factory_info		*factory_info;
 	struct tsp_raw_data		*raw_data;
 #endif
+#ifdef CONFIG_FB
+	struct notifier_block fb_notif;
+#endif
 	struct regulator *vddo_vreg;
 	struct regulator *vdd_en;
 	bool device_enabled;
@@ -729,6 +737,11 @@ static void esd_timer_start(u16 sec, struct bt541_ts_info *info);
 static void esd_timer_stop(struct bt541_ts_info *info);
 static void esd_timer_init(struct bt541_ts_info *info);
 static void esd_timeout_handler(unsigned long data);
+#endif
+
+#ifdef CONFIG_FB
+static int fb_notifier_callback(struct notifier_block *self,
+	unsigned long event, void *data);
 #endif
 
 static long ts_misc_fops_ioctl(struct file *filp, unsigned int cmd,
@@ -1970,6 +1983,11 @@ retry_init:
 #if defined(TSP_VERBOSE_DEBUG)
 	dev_info(&client->dev, "Esd timer register = %d\n", reg_val);
 #endif
+#endif
+#ifdef CONFIG_FB
+	info->fb_notif.notifier_call = fb_notifier_callback;
+	if (fb_register_client(&info->fb_notif))
+		pr_err("%s: could not create fb notifier\n", __func__);
 #endif
 	zinitix_debug_msg("successfully initialized\r\n");
 	return true;
@@ -5021,6 +5039,10 @@ static int bt541_ts_remove(struct i2c_client *client)
 	destroy_workqueue(esd_tmr_workqueue);
 #endif
 
+#ifdef CONFIG_FB
+	fb_unregister_client(&info->fb_notif);
+#endif
+
 	if (info->irq)
 		free_irq(info->irq, info);
 
@@ -5060,6 +5082,35 @@ void bt541_ts_shutdown(struct i2c_client *client)
 	bt541_power_control(info, POWER_OFF);
 	dev_info(&client->dev, "%s--\n", __func__);
 }
+
+#ifdef CONFIG_FB
+static int fb_notifier_callback(struct notifier_block *self,
+				unsigned long event, void *data)
+{
+	struct fb_event *evdata = data;
+	struct bt541_ts_info *tc_data = container_of(self, struct bt541_ts_info, fb_notif);
+
+	if (evdata && evdata->data && event == FB_EVENT_BLANK) {
+		int *blank = evdata->data;
+		switch (*blank) {
+		case FB_BLANK_UNBLANK:
+		case FB_BLANK_NORMAL:
+		case FB_BLANK_VSYNC_SUSPEND:
+		case FB_BLANK_HSYNC_SUSPEND:
+			bt541_input_open(tc_data->input_dev);
+			break;
+		case FB_BLANK_POWERDOWN:
+			bt541_input_close(tc_data->input_dev);
+			break;
+		default:
+			/* Don't handle what we don't understand */
+			break;
+		}
+	}
+
+	return 0;
+}
+#endif
 
 static struct i2c_device_id bt541_idtable[] = {
 	{BT541_TS_DEVICE, 0},
