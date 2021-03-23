@@ -38,6 +38,11 @@
 #include <linux/of_gpio.h>
 #endif
 
+#ifdef CONFIG_FB
+#include <linux/notifier.h>
+#include <linux/fb.h>
+#endif
+
 #if defined(CONFIG_TOUCH_DISABLER)
 #include <linux/input/touch_disabler.h>
 #endif
@@ -168,6 +173,9 @@ struct abov_tk_info {
 	bool led_twinkle_check;
 #endif
 	bool dual_mode;
+#ifdef CONFIG_FB
+	struct notifier_block fb_notif;
+#endif
 
 };
 
@@ -176,6 +184,11 @@ static int abov_tk_input_open(struct input_dev *dev);
 static void abov_tk_input_close(struct input_dev *dev);
 static int abov_tk_i2c_read_checksum(struct abov_tk_info *info);
 static void abov_tk_dual_detection_mode(struct abov_tk_info *info, int mode);
+
+#ifdef CONFIG_FB
+static int fb_notifier_callback(struct notifier_block *self,
+	unsigned long event, void *data);
+#endif
 
 static int abov_touchkey_led_status;
 static int abov_touchled_cmd_reserved;
@@ -1564,6 +1577,12 @@ static int abov_tk_probe(struct i2c_client *client,
 	touch_disabler_set_tk_dev(input_dev);
 #endif
 
+#ifdef CONFIG_FB
+	info->fb_notif.notifier_call = fb_notifier_callback;
+	if (fb_register_client(&info->fb_notif))
+		pr_err("%s: could not create fb notifier\n", __func__);
+#endif
+
 	dev_err(&client->dev, "%s done\n", __func__);
 	info->probe_done = true;
 
@@ -1615,6 +1634,10 @@ static int abov_tk_remove(struct i2c_client *client)
 
 	if (info->enabled)
 		info->pdata->power(info->pdata, false);
+
+#ifdef CONFIG_FB
+	fb_unregister_client(&info->fb_notif);
+#endif
 
 	info->enabled = false;
 	if (info->irq >= 0)
@@ -1711,6 +1734,35 @@ static int abov_tk_resume(struct device *dev)
 
 	return 0;
 }
+
+#ifdef CONFIG_FB
+static int fb_notifier_callback(struct notifier_block *self,
+				unsigned long event, void *data)
+{
+	struct fb_event *evdata = data;
+	struct abov_tk_info *tc_info = container_of(self, struct abov_tk_info, fb_notif);
+
+	if (evdata && evdata->data && event == FB_EVENT_BLANK) {
+		int *blank = evdata->data;
+		switch (*blank) {
+		case FB_BLANK_UNBLANK:
+		case FB_BLANK_NORMAL:
+		case FB_BLANK_VSYNC_SUSPEND:
+		case FB_BLANK_HSYNC_SUSPEND:
+			abov_tk_input_open(tc_info->input_dev);
+			break;
+		case FB_BLANK_POWERDOWN:
+			abov_tk_input_close(tc_info->input_dev);
+			break;
+		default:
+			/* Don't handle what we don't understand */
+			break;
+		}
+	}
+
+	return 0;
+}
+#endif
 
 static int abov_tk_input_open(struct input_dev *dev)
 {
