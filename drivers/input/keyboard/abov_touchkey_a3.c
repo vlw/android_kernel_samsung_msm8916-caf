@@ -339,10 +339,6 @@ static irqreturn_t abov_tk_interrupt(int irq, void *dev_id)
 	u8 buf;
 	bool press;
 
-	if (!atomic_read(&info->keypad_enable)) {
-		return IRQ_HANDLED;
-	}
-
 	ret = abov_tk_i2c_read(client, ABOV_BTNSTATUS, &buf, 1);
 	if (ret < 0) {
 		retry = 3;
@@ -359,6 +355,10 @@ static irqreturn_t abov_tk_interrupt(int irq, void *dev_id)
 			abov_tk_reset(info);
 			return IRQ_HANDLED;
 		}
+	}
+
+	if (!atomic_read(&info->keypad_enable)) {
+		return IRQ_HANDLED;
 	}
 
 	if (info->dual_mode) {
