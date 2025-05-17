@@ -176,7 +176,7 @@ struct abov_tk_info {
 #ifdef CONFIG_FB
 	struct notifier_block fb_notif;
 #endif
-
+	atomic_t	keypad_enable;
 };
 
 
@@ -338,6 +338,10 @@ static irqreturn_t abov_tk_interrupt(int irq, void *dev_id)
 	int ret, retry;
 	u8 buf;
 	bool press;
+
+	if (!atomic_read(&info->keypad_enable)) {
+		return IRQ_HANDLED;
+	}
 
 	ret = abov_tk_i2c_read(client, ABOV_BTNSTATUS, &buf, 1);
 	if (ret < 0) {
@@ -1150,7 +1154,30 @@ static ssize_t abov_set_dual_detection_mode(struct device *dev,
 	return count;
 }
 
+static ssize_t sec_keypad_enable_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct abov_tk_info *info = dev_get_drvdata(dev);
 
+	return sprintf(buf, "%d\n", atomic_read(&info->keypad_enable));
+}
+
+static ssize_t sec_keypad_enable_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct abov_tk_info *info = dev_get_drvdata(dev);
+
+	unsigned int val = 0;
+	sscanf(buf, "%d", &val);
+	val = (val == 0 ? 0 : 1);
+	atomic_set(&info->keypad_enable, val);
+	release_all_fingers(info);
+
+	return count;
+}
+
+static DEVICE_ATTR(keypad_enable, S_IRUGO|S_IWUSR, sec_keypad_enable_show,
+	      sec_keypad_enable_store);
 static DEVICE_ATTR(touchkey_threshold, S_IRUGO, touchkey_threshold_show, NULL);
 static DEVICE_ATTR(brightness, S_IRUGO | S_IWUSR | S_IWGRP, NULL,
 			touchkey_led_control);
@@ -1173,6 +1200,7 @@ static DEVICE_ATTR(detection_mode, S_IRUGO | S_IWUSR | S_IWGRP,
 			NULL, abov_set_dual_detection_mode);
 
 static struct attribute *sec_touchkey_attributes[] = {
+	&dev_attr_keypad_enable.attr,
 	&dev_attr_touchkey_threshold.attr,
 	&dev_attr_brightness.attr,
 	&dev_attr_touchkey_recent.attr,
@@ -1527,6 +1555,7 @@ static int abov_tk_probe(struct i2c_client *client,
 	}
 
 	info->enabled = true;
+	atomic_set(&info->keypad_enable, 1);
 
 	if (!info->pdata->irq_flag) {
 		dev_err(&client->dev, "no irq_flag\n");
