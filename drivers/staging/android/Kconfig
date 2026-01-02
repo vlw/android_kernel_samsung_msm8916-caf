@@ -20,22 +20,17 @@ config ANDROID_BINDER_IPC
 	  between said processes.
 
 config ANDROID_BINDER_IPC_32BIT
-	bool
+	bool "Use old (Android 4.4 and earlier) 32-bit binder API"
 	depends on !64BIT && ANDROID_BINDER_IPC
 	default y
 	---help---
-	  The Binder API has been changed to support both 32 and 64bit
-	  applications in a mixed environment.
-
-	  Enable this to support an old 32-bit Android user-space (v4.4 and
-	  earlier).
-
-	  Note that enabling this will break newer Android user-space.
+	  Enable to support an old 32-bit Android user-space. Breaks the new
+	  Android user-space.
 
 config ANDROID_BINDER_DEVICES
 	string "Android Binder devices"
 	depends on ANDROID_BINDER_IPC
-	default "binder,hwbinder,vndbinder"
+	default "binder,hwbinder"
 	---help---
 	  Default value for the binder.devices parameter.
 
@@ -44,15 +39,6 @@ config ANDROID_BINDER_DEVICES
 	  created. Each binder device has its own context manager, and is
 	  therefore logically separated from the other devices.
 
-config ANDROID_BINDER_IPC_SELFTEST
-        bool "Android Binder IPC Driver Selftest"
-        depends on ANDROID_BINDER_IPC
-        ---help---
-          This feature allows binder selftest to run.
-
-          Binder selftest checks the allocation and free of binder buffers
-          exhaustively with combinations of various buffer sizes and
-          alignments.
 config ASHMEM
 	bool "Enable the Anonymous Shared Memory Subsystem"
 	default n
