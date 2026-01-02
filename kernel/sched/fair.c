@@ -1400,7 +1400,7 @@ void set_hmp_defaults(void)
 static inline int is_big_task(struct task_struct *p)
 {
 	u64 load = task_load(p);
-	int nice = TASK_NICE(p);
+	int nice = task_nice(p);
 
 	/* Todo: Provide cgroup-based control as well? */
 	if (nice > sched_upmigrate_min_nice)
@@ -1579,7 +1579,7 @@ static int task_load_will_fit(struct task_struct *p, u64 task_load, int cpu)
 		if (rq->capacity > prev_rq->capacity)
 			return 1;
 	} else {
-		nice = TASK_NICE(p);
+		nice = task_nice(p);
 		/* Todo: Provide cgroup-based control as well? */
 		if (nice > sched_upmigrate_min_nice)
 			return 1;
@@ -2388,7 +2388,7 @@ static int lower_power_cpu_available(struct task_struct *p, int cpu)
  */
 static inline int migration_needed(struct rq *rq, struct task_struct *p)
 {
-	int nice = TASK_NICE(p);
+	int nice = task_nice(p);
 
 	if (!sched_enable_hmp || p->state != TASK_RUNNING)
 		return 0;
