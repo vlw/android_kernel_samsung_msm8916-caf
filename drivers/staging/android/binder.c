@@ -2999,7 +2999,7 @@ retry:
 		trd->data.ptr.buffer = (binder_uintptr_t)(
 					(uintptr_t)t->buffer->data +
 					proc->user_buffer_offset);
-		trd->data.ptr.offsets = tr.data.ptr.buffer +
+		trd->data.ptr.offsets = trd->data.ptr.buffer +
 					ALIGN(t->buffer->data_size,
 					    sizeof(void *));
 
