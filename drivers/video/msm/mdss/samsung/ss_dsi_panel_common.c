@@ -856,6 +856,18 @@ int mdss_samsung_send_cmd(struct mdss_dsi_ctrl_pdata *ctrl, enum mipi_samsung_cm
 	}
 
 	mutex_lock(&vdd->vdd_lock);
+	/*
+	 * The blank state may have changed while waiting for vdd_lock. Never
+	 * send to a blanked panel, and leave mDNIe tuning alone while the
+	 * panel is being turned on: panel_on_post applies it anyway.
+	 */
+	if (pinfo->blank_state == MDSS_PANEL_BLANK_BLANK ||
+	    (cmd == PANEL_MDNIE_TUNE &&
+	     pinfo->blank_state == MDSS_PANEL_BLANK_READY_TO_UNBLANK)) {
+		mutex_unlock(&vdd->vdd_lock);
+		pr_err("%s: Skip to tx command %d\n", __func__, __LINE__);
+		return 0;
+	}
 	mdss_dsi_panel_cmds_send(ctrl, mdss_samsung_cmds_select(ctrl, cmd));
 	mutex_unlock(&vdd->vdd_lock);
 

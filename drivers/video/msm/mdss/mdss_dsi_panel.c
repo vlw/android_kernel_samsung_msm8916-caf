@@ -898,6 +898,13 @@ static int mdss_dsi_panel_off(struct mdss_panel_data *pdata)
 	vdd = check_valid_ctrl(ctrl);
 	mdss_samsung_panel_off_pre(pdata);
 	mutex_lock(&vdd->vdd_lock);
+	/*
+	 * Mark the panel blank before sending the off commands, so that
+	 * mdss_samsung_send_cmd() callers waiting on vdd_lock (e.g. mDNIe
+	 * from sysfs) see it and do not start a DSI transfer while the
+	 * controller is being turned off.
+	 */
+	pinfo->blank_state = MDSS_PANEL_BLANK_BLANK;
 #endif
 
 	if (ctrl->off_cmds.cmd_cnt)
