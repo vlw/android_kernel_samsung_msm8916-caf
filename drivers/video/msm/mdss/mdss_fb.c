@@ -468,6 +468,7 @@ static void __mdss_fb_idle_notify_work(struct work_struct *work)
 	/* Notify idle-ness here */
 	pr_debug("Idle timeout %dms expired!\n", mfd->idle_time);
 	sysfs_notify(&mfd->fbi->dev->kobj, NULL, "idle_notify");
+	sysfs_notify(&mfd->fbi->dev->kobj, NULL, "idle_state");
 }
 
 static ssize_t mdss_fb_get_idle_time(struct device *dev,
@@ -513,6 +514,20 @@ static ssize_t mdss_fb_get_idle_notify(struct device *dev,
 		work_busy(&mfd->idle_notify_work.work) ? "no" : "yes");
 
 	return ret;
+}
+
+/*
+ * Same information as idle_notify in the "idle"/"busy" form that the
+ * power HAL polls to end interaction boosts once the display goes idle.
+ */
+static ssize_t mdss_fb_get_idle_state(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct fb_info *fbi = dev_get_drvdata(dev);
+	struct msm_fb_data_type *mfd = fbi->par;
+
+	return scnprintf(buf, PAGE_SIZE, "%s",
+		work_busy(&mfd->idle_notify_work.work) ? "busy" : "idle");
 }
 
 static ssize_t mdss_fb_get_panel_info(struct device *dev,
@@ -695,6 +710,7 @@ static DEVICE_ATTR(show_blank_event, S_IRUGO, mdss_mdp_show_blank_event, NULL);
 static DEVICE_ATTR(idle_time, S_IRUGO | S_IWUSR | S_IWGRP,
 	mdss_fb_get_idle_time, mdss_fb_set_idle_time);
 static DEVICE_ATTR(idle_notify, S_IRUGO, mdss_fb_get_idle_notify, NULL);
+static DEVICE_ATTR(idle_state, S_IRUGO, mdss_fb_get_idle_state, NULL);
 static DEVICE_ATTR(msm_fb_panel_info, S_IRUGO, mdss_fb_get_panel_info, NULL);
 static DEVICE_ATTR(msm_fb_src_split_info, S_IRUGO, mdss_fb_get_src_split_info,
 	NULL);
@@ -710,6 +726,7 @@ static struct attribute *mdss_fb_attrs[] = {
 	&dev_attr_show_blank_event.attr,
 	&dev_attr_idle_time.attr,
 	&dev_attr_idle_notify.attr,
+	&dev_attr_idle_state.attr,
 	&dev_attr_msm_fb_panel_info.attr,
 	&dev_attr_msm_fb_src_split_info.attr,
 	&dev_attr_msm_fb_thermal_level.attr,
