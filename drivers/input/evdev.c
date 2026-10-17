@@ -240,7 +240,12 @@ static void evdev_detach_client(struct evdev *evdev,
 	spin_lock(&evdev->client_lock);
 	list_del_rcu(&client->node);
 	spin_unlock(&evdev->client_lock);
-	synchronize_rcu();
+	/*
+	 * Expedite the grace period: with RCU_FAST_NO_HZ a normal one takes
+	 * tens of milliseconds and every close() of an event device waits
+	 * for it.
+	 */
+	synchronize_rcu_expedited();
 }
 
 static int evdev_open_device(struct evdev *evdev)

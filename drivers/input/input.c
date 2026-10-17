@@ -661,7 +661,7 @@ void input_close_device(struct input_handle *handle)
 		 * completed and that no more input events are delivered
 		 * through this handle
 		 */
-		synchronize_rcu();
+		synchronize_rcu_expedited();
 	}
 
 	mutex_unlock(&dev->mutex);
