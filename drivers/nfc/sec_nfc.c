@@ -167,6 +167,15 @@ static ssize_t sec_nfc_read(struct file *file, char __user *buf,
 		goto out;
 	}
 
+	/*
+	 * The HAL reads the payload of a bootloader response separately,
+	 * even when it is empty. A zero length i2c-gpio read leaves the
+	 * bootloader in the middle of a transfer and it NACKs the next
+	 * write, which aborts the firmware update.
+	 */
+	if (!count)
+		goto out;
+
 	mutex_lock(&info->i2c_info.read_mutex);
 	irq = info->i2c_info.read_irq;
 	mutex_unlock(&info->i2c_info.read_mutex);
