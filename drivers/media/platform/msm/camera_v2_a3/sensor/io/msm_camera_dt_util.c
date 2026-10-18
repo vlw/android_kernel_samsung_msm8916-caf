@@ -1434,9 +1434,21 @@ static int msm_camera_disable_i2c_mux(struct msm_camera_i2c_conf *i2c_conf)
 
 static int msm_camera_pinctrl_init(struct msm_camera_power_ctrl_t *ctrl)
 {
-	struct msm_pinctrl_info *sensor_pctrl = NULL;
+	struct msm_pinctrl_info *sensor_pctrl = &ctrl->pinctrl_info;
+	/* GPIO-I2C EEPROM buses have eeprom_* states, not sensor states.
+	 * Their pins are shared with the rear sensor. Selecting those states
+	 * here retains EEPROM mux ownership through the device-core pinctrl
+	 * reference after power-down and prevents the sensor from claiming them.
+	 * Leave this bus to its existing GPIO-I2C/sensor owner, as on stock.
+	 */
+	if (of_property_match_string(ctrl->dev->of_node, "pinctrl-names",
+			CAM_SENSOR_PINCTRL_STATE_DEFAULT) < 0 &&
+	    (of_property_match_string(ctrl->dev->of_node, "pinctrl-names",
+			"eeprom_default") >= 0 ||
+	     of_property_match_string(ctrl->dev->of_node, "pinctrl-names",
+			"eeprom_default2") >= 0))
+		return -ENOENT;
 
-	sensor_pctrl = &ctrl->pinctrl_info;
 	sensor_pctrl->pinctrl = devm_pinctrl_get(ctrl->dev);
 	if (IS_ERR_OR_NULL(sensor_pctrl->pinctrl)) {
 		pr_err("%s:%d Getting pinctrl handle failed\n",
@@ -1445,21 +1457,26 @@ static int msm_camera_pinctrl_init(struct msm_camera_power_ctrl_t *ctrl)
 	}
 	sensor_pctrl->gpio_state_active =
 		pinctrl_lookup_state(sensor_pctrl->pinctrl,
-				CAM_SENSOR_PINCTRL_STATE_DEFAULT);
+			CAM_SENSOR_PINCTRL_STATE_DEFAULT);
 	if (IS_ERR_OR_NULL(sensor_pctrl->gpio_state_active)) {
-		pr_err("%s:%d Failed to get the active state pinctrl handle\n",
-			__func__, __LINE__);
-		return -EINVAL;
+		pr_err("%s:%d Failed to get pinctrl state %s\n",
+			__func__, __LINE__, CAM_SENSOR_PINCTRL_STATE_DEFAULT);
+		goto put_pinctrl;
 	}
-	sensor_pctrl->gpio_state_suspend
-		= pinctrl_lookup_state(sensor_pctrl->pinctrl,
-				CAM_SENSOR_PINCTRL_STATE_SLEEP);
+	sensor_pctrl->gpio_state_suspend =
+		pinctrl_lookup_state(sensor_pctrl->pinctrl,
+			CAM_SENSOR_PINCTRL_STATE_SLEEP);
 	if (IS_ERR_OR_NULL(sensor_pctrl->gpio_state_suspend)) {
-		pr_err("%s:%d Failed to get the suspend state pinctrl handle\n",
-				__func__, __LINE__);
-		return -EINVAL;
+		pr_err("%s:%d Failed to get pinctrl state %s\n",
+			__func__, __LINE__, CAM_SENSOR_PINCTRL_STATE_SLEEP);
+		goto put_pinctrl;
 	}
 	return 0;
+
+put_pinctrl:
+	devm_pinctrl_put(sensor_pctrl->pinctrl);
+	sensor_pctrl->pinctrl = NULL;
+	return -EINVAL;
 }
 
 int msm_camera_power_up(struct msm_camera_power_ctrl_t *ctrl,
@@ -1484,7 +1501,8 @@ int msm_camera_power_up(struct msm_camera_power_ctrl_t *ctrl,
 	}
 	ret = msm_camera_pinctrl_init(ctrl);
 	if (ret < 0) {
-		pr_err("%s:%d Initialization of pinctrl failed\n",
+		if (ret != -ENOENT)
+			pr_err("%s:%d Initialization of pinctrl failed\n",
 				__func__, __LINE__);
 		ctrl->cam_pinctrl_status = 0;
 	} else {
