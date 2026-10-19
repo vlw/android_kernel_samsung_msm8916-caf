@@ -153,5 +153,6 @@ struct security_class_mapping secclass_map[] = {
 	  { COMMON_SOCK_PERMS, "attach_queue", NULL } },
 	{ "binder", { "impersonate", "call", "set_context_mgr", "transfer", NULL } },
 	{ "bpf", { "map_create", "map_read", "map_write", "prog_load", "prog_run", NULL } },
+	{ "netlink_netfilter_socket", { COMMON_SOCK_PERMS, NULL } },
 	{ NULL }
   };
