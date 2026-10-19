@@ -69,6 +69,7 @@
 #include <linux/usb/msm_hsusb.h>
 #include <linux/tracepoint.h>
 #include <linux/qcom/usb_trace.h>
+DEFINE_TRACE(usb_daytona_invalid_access);
 
 #include "ci13xxx_udc.h"
 

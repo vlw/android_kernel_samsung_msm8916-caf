@@ -903,7 +903,7 @@ static inline void clear_reserved(int cpu) { }
 /*
  * Return the group to which this tasks belongs.
  *
- * We cannot use task_subsys_state() and friends because the cgroup
+ * We cannot use task_css() and friends because the cgroup
  * subsystem changes that value before the cgroup_subsys::attach() method
  * is called, therefore we cannot pin it and might observe the wrong value.
  *

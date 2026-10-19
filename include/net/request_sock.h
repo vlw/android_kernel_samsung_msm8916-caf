@@ -48,6 +48,7 @@ extern int inet_rtx_syn_ack(struct sock *parent, struct request_sock *req);
 /* struct request_sock - mini sock to represent a connection request
  */
 struct request_sock {
+	struct sock_common		__req_common;
 	struct request_sock		*dl_next;
 	u16				mss;
 	u8				num_retrans; /* number of retransmits */
@@ -68,8 +69,10 @@ static inline struct request_sock *reqsk_alloc(const struct request_sock_ops *op
 {
 	struct request_sock *req = kmem_cache_alloc(ops->slab, GFP_ATOMIC);
 
-	if (req != NULL)
+	if (req != NULL) {
 		req->rsk_ops = ops;
+		atomic64_set(&req->__req_common.skc_cookie, 0);
+	}
 
 	return req;
 }

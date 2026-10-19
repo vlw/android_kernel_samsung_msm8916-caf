@@ -37,7 +37,7 @@ static struct bch_cgroup *cgroup_to_bcache(struct cgroup *cgroup)
 {
 	struct cgroup_subsys_state *css;
 	return cgroup &&
-		(css = cgroup_subsys_state(cgroup, bcache_subsys_id))
+		(css = cgroup_css(cgroup, bcache_subsys_id))
 		? container_of(css, struct bch_cgroup, css)
 		: &bcache_default_cgroup;
 }
@@ -45,8 +45,8 @@ static struct bch_cgroup *cgroup_to_bcache(struct cgroup *cgroup)
 struct bch_cgroup *bch_bio_to_cgroup(struct bio *bio)
 {
 	struct cgroup_subsys_state *css = bio->bi_css
-		? cgroup_subsys_state(bio->bi_css->cgroup, bcache_subsys_id)
-		: task_subsys_state(current, bcache_subsys_id);
+		? cgroup_css(bio->bi_css->cgroup, bcache_subsys_id)
+		: task_css(current, bcache_subsys_id);
 
 	return css
 		? container_of(css, struct bch_cgroup, css)
@@ -164,7 +164,6 @@ static struct cgroup_subsys_state *bcachecg_create(struct cgroup *cgroup)
 static void bcachecg_destroy(struct cgroup *cgroup)
 {
 	struct bch_cgroup *cg = cgroup_to_bcache(cgroup);
-	free_css_id(&bcache_subsys, &cg->css);
 	kfree(cg);
 }
 

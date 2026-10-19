@@ -179,22 +179,20 @@ int blkg_conf_prep(struct blkcg *blkcg, const struct blkcg_policy *pol,
 void blkg_conf_finish(struct blkg_conf_ctx *ctx);
 
 
-static inline struct blkcg *cgroup_to_blkcg(struct cgroup *cgroup)
+static inline struct blkcg *css_to_blkcg(struct cgroup_subsys_state *css)
 {
-	return container_of(cgroup_subsys_state(cgroup, blkio_subsys_id),
-			    struct blkcg, css);
+	return css ? container_of(css, struct blkcg, css) : NULL;
 }
 
 static inline struct blkcg *task_blkcg(struct task_struct *tsk)
 {
-	return container_of(task_subsys_state(tsk, blkio_subsys_id),
-			    struct blkcg, css);
+	return css_to_blkcg(task_css(tsk, blkio_cgrp_id));
 }
 
 static inline struct blkcg *bio_blkcg(struct bio *bio)
 {
 	if (bio && bio->bi_css)
-		return container_of(bio->bi_css, struct blkcg, css);
+		return css_to_blkcg(bio->bi_css);
 	return task_blkcg(current);
 }
 
@@ -206,9 +204,7 @@ static inline struct blkcg *bio_blkcg(struct bio *bio)
  */
 static inline struct blkcg *blkcg_parent(struct blkcg *blkcg)
 {
-	struct cgroup *pcg = blkcg->css.cgroup->parent;
-
-	return pcg ? cgroup_to_blkcg(pcg) : NULL;
+	return css_to_blkcg(blkcg->css.parent);
 }
 
 /**
@@ -245,12 +241,13 @@ static inline struct blkcg_gq *pd_to_blkg(struct blkg_policy_data *pd)
  */
 static inline int blkg_path(struct blkcg_gq *blkg, char *buf, int buflen)
 {
-	int ret;
+	int ret = cgroup_path(blkg->blkcg->css.cgroup, buf, buflen);
 
-	ret = cgroup_path(blkg->blkcg->css.cgroup, buf, buflen);
-	if (ret)
+	if (ret < 0) {
 		strncpy(buf, "<unavailable>", buflen);
-	return ret;
+		return ret;
+	}
+	return 0;
 }
 
 /**

@@ -260,7 +260,7 @@ static int inet_twsk_diag_fill(struct inet_timewait_sock *tw,
 	r->idiag_retrans      = 0;
 
 	r->id.idiag_if	      = tw->tw_bound_dev_if;
-	sock_diag_save_cookie(tw, r->id.idiag_cookie);
+	sock_diag_save_cookie((struct sock*) tw, r->id.idiag_cookie);
 
 	r->id.idiag_sport     = tw->tw_sport;
 	r->id.idiag_dport     = tw->tw_dport;
@@ -775,7 +775,9 @@ static int inet_diag_fill_req(struct sk_buff *skb, struct sock *sk,
 	r->idiag_retrans = req->num_retrans;
 
 	r->id.idiag_if = sk->sk_bound_dev_if;
-	sock_diag_save_cookie(req, r->id.idiag_cookie);
+	BUILD_BUG_ON(offsetof(struct inet_request_sock, ir_cookie) !=
+		     offsetof(struct sock, sk_cookie));
+	sock_diag_save_cookie((struct sock *)ireq, r->id.idiag_cookie);
 
 	tmo = req->expires - jiffies;
 	if (tmo < 0)
@@ -1175,15 +1177,56 @@ static int inet_diag_handler_cmd(struct sk_buff *skb, struct nlmsghdr *h)
 	return inet_diag_cmd_exact(h->nlmsg_type, skb, h, nlmsg_data(h));
 }
 
+/* Snapshot the still-live socket before its final destructor runs. */
+static int inet_diag_handler_get_info(struct sk_buff *skb, struct sock *sk)
+{
+	const struct inet_sock *inet = inet_sk(sk);
+	const struct inet_diag_handler *handler;
+	struct nlmsghdr *nlh;
+	struct inet_diag_msg *r;
+
+	nlh = nlmsg_put(skb, 0, 0, SOCK_DIAG_BY_FAMILY, sizeof(*r), 0);
+	if (!nlh)
+		return -EMSGSIZE;
+	r = nlmsg_data(nlh);
+	memset(r, 0, sizeof(*r));
+	r->idiag_family = sk->sk_family;
+	r->idiag_state = sk->sk_state;
+	r->id.idiag_if = sk->sk_bound_dev_if;
+	sock_diag_save_cookie(sk, r->id.idiag_cookie);
+	r->id.idiag_sport = inet->inet_sport;
+	r->id.idiag_dport = inet->inet_dport;
+	r->id.idiag_src[0] = inet->inet_rcv_saddr;
+	r->id.idiag_dst[0] = inet->inet_daddr;
+#if IS_ENABLED(CONFIG_IPV6)
+	if (sk->sk_family == AF_INET6) {
+		const struct ipv6_pinfo *np = inet6_sk(sk);
+		*(struct in6_addr *)r->id.idiag_src = np->rcv_saddr;
+		*(struct in6_addr *)r->id.idiag_dst = np->daddr;
+	}
+#endif
+	r->idiag_uid = from_kuid_munged(sock_net(sk)->user_ns, sk->sk_uid);
+	r->idiag_inode = sock_i_ino(sk);
+	mutex_lock(&inet_diag_table_mutex);
+	handler = inet_diag_table[sk->sk_protocol];
+	if (handler)
+		handler->idiag_get_info(sk, r, NULL);
+	mutex_unlock(&inet_diag_table_mutex);
+	nlmsg_end(skb, nlh);
+	return 0;
+}
+
 static const struct sock_diag_handler inet_diag_handler = {
 	.family = AF_INET,
 	.dump = inet_diag_handler_cmd,
+	.get_info = inet_diag_handler_get_info,
 	.destroy = inet_diag_handler_cmd,
 };
 
 static const struct sock_diag_handler inet6_diag_handler = {
 	.family = AF_INET6,
 	.dump = inet_diag_handler_cmd,
+	.get_info = inet_diag_handler_get_info,
 	.destroy = inet_diag_handler_cmd,
 };
 

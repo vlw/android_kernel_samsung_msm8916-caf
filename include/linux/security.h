@@ -22,6 +22,7 @@
 #ifndef __LINUX_SECURITY_H
 #define __LINUX_SECURITY_H
 
+#include <linux/bpf.h>
 #include <linux/key.h>
 #include <linux/capability.h>
 #include <linux/slab.h>
@@ -1690,6 +1691,16 @@ struct security_operations {
 				 struct audit_context *actx);
 	void (*audit_rule_free) (void *lsmrule);
 #endif /* CONFIG_AUDIT */
+#ifdef CONFIG_BPF_SYSCALL
+    int (*bpf)(int cmd, union bpf_attr *attr,
+                 unsigned int size);
+    int (*bpf_map)(struct bpf_map *map, fmode_t fmode);
+    int (*bpf_prog)(struct bpf_prog *prog);
+    int (*bpf_map_alloc_security)(struct bpf_map *map);
+    void (*bpf_map_free_security)(struct bpf_map *map);
+    int (*bpf_prog_alloc_security)(struct bpf_prog_aux *aux);
+    void (*bpf_prog_free_security)(struct bpf_prog_aux *aux);
+#endif /* CONFIG_BPF_SYSCALL */
 };
 
 /* prototypes */
@@ -1700,6 +1711,17 @@ extern void __init security_fixup_ops(struct security_operations *ops);
 
 
 /* Security operations */
+
+#ifdef CONFIG_BPF_SYSCALL
+int security_bpf(int cmd, union bpf_attr *attr, unsigned int size);
+int security_bpf_map(struct bpf_map *map, fmode_t fmode);
+int security_bpf_prog(struct bpf_prog *prog);
+int security_bpf_map_alloc(struct bpf_map *map);
+int security_bpf_prog_alloc(struct bpf_prog_aux *aux);
+void security_bpf_map_free(struct bpf_map *map);
+void security_bpf_prog_free(struct bpf_prog_aux *aux);
+#endif /* CONFIG_BPF_SYSCALL */
+
 int security_binder_set_context_mgr(struct task_struct *mgr);
 int security_binder_transaction(struct task_struct *from, struct task_struct *to);
 int security_binder_transfer_binder(struct task_struct *from, struct task_struct *to);
