@@ -38,6 +38,7 @@
 static void __init msm8916_dt_reserve(void)
 {
 	of_scan_flat_dt(dt_scan_for_memory_reserve, NULL);
+	sec_log_reserve();
 }
 
 static void __init msm8916_map_io(void)

@@ -25,6 +25,7 @@
 #include <linux/jiffies.h>
 #include <linux/nmi.h>
 #include <linux/module.h>
+#include <linux/memblock.h>
 #include <linux/moduleparam.h>
 #include <linux/interrupt.h>			/* For in_interrupt() */
 #include <linux/delay.h>
@@ -267,8 +268,8 @@ static u32 clear_idx;
  *
  * In above case, log_buf size is 256KB and its physical base address
  * is 0x45000000. Actually, *(int *)(base - 8) is log_magic and *(int
- * *)(base - 4) is log_ptr. Therefore we reserve (size + 8) bytes from
- * (base - 8)
+ * *)(base - 4) is log_ptr. The IRQ flag is at base - 12, so the entire
+ * metadata and payload range must be kept out of ordinary RAM.
  */
 #undef LOG_MAGIC
 #define LOG_MAGIC 0x4d474f4c /* "LOGM" */
@@ -282,6 +283,7 @@ static unsigned sec_log_size;
 static unsigned sec_log_save_size;
 static phys_addr_t sec_log_save_base;
 static phys_addr_t sec_log_reserve_base;
+static bool sec_log_reserved;
 /* This will be removed later once
  * we will have new design of kloginfo()
  * ready.
@@ -2075,8 +2077,35 @@ static int __init sec_log_save_old(void)
 					 i) & (sec_log_size - 1)];
 		return 1;
 	} else {
+		/* Never publish a nonzero proc size backed by a NULL buffer. */
+		last_kmsg_size = 0;
 		return 0;
 	}
+}
+
+/* Called by the board reserve hook before the linear RAM mapping is built.
+ * Reserving alone is insufficient on ARM: a cached RAM alias would remain.
+ */
+void __init sec_log_reserve(void)
+{
+	phys_addr_t start, end;
+
+	if (!sec_log_save_size)
+		return;
+	start = round_down(sec_log_save_base - 12, (phys_addr_t)PAGE_SIZE);
+	end = round_up(sec_log_save_base + sec_log_save_size,
+		       (phys_addr_t)PAGE_SIZE);
+	if (end <= start || !memblock_is_region_memory(start, end - start) ||
+	    memblock_is_region_reserved(start, end - start)) {
+		pr_err("sec_log: invalid or occupied physical buffer, not mapping\n");
+		return;
+	}
+	if (memblock_remove(start, end - start) ||
+	    memblock_reserve(start, end - start)) {
+		pr_err("sec_log: failed to reserve persistent buffer\n");
+		return;
+	}
+	sec_log_reserved = true;
 }
 
 static int __init printk_remap_nocache(void)
@@ -2087,23 +2116,8 @@ static int __init printk_remap_nocache(void)
 	int rc = 0;
 	int bOk = 0;
 
-	/*sec_getlog_supply_kloginfo(log_buf);*/
-
-	if (0 == 1) {
-#ifdef CONFIG_SEC_DEBUG_LOW_LOG
-		nocache_base = ioremap_nocache(sec_log_save_base - 4096,
-		sec_log_save_size + 8192);
-		nocache_base = nocache_base + 4096;
-
-		sec_log_mag = nocache_base - 8;
-		sec_log_ptr = nocache_base - 4;
-		sec_log_buf = nocache_base;
-		sec_log_size = sec_log_save_size;
-		sec_log_irq_en = nocache_base - 0xC;
-#endif
-		return rc;
-	}
-/* CONFIG_SEC_DEBUG_NOCACHE_LOG_IN_LEVEL_LOW */
+	if (!sec_log_reserved)
+		return 0;
 
 #ifdef CONFIG_ARM_LPAE
 	pr_err("%s: sec_log_save_size %d at sec_log_save_base 0x%llx\n",
@@ -2121,8 +2135,9 @@ static int __init printk_remap_nocache(void)
 		(unsigned long) sec_log_reserve_base);
 #endif
 
-	nocache_base = ioremap_nocache((phys_addr_t)(sec_log_save_base-4096),
-					sec_log_save_size + 8192);
+	/* Include magic, write pointer and the preceding IRQ flag word. */
+	nocache_base = ioremap_nocache(sec_log_save_base - 12,
+				     sec_log_save_size + 12);
 
 	if (!nocache_base) {
 		pr_err("Failed to remap nocache log region\n");
@@ -2138,7 +2153,7 @@ static int __init printk_remap_nocache(void)
 		(unsigned long) sec_log_save_base);
 #endif
 
-	nocache_base = nocache_base + 4096;
+	nocache_base = nocache_base + 12;
 
 	sec_log_mag = nocache_base - 8;
 	sec_log_ptr = nocache_base - 4;
@@ -2226,17 +2241,20 @@ static int __init sec_log_setup(char *str)
 		unsigned long long base = 0;
 
 		ret = kstrtoull(++str, 0, &base);
+		if (ret || base < 12 || (phys_addr_t)base != base ||
+		    (phys_addr_t)(base + size) <= base)
+			return -EINVAL;
 
 		sec_log_save_size = size;
 		sec_log_save_base = base;
 		sec_log_size = size;
-		sec_log_reserve_base = base - 8;
-		sec_log_reserve_size = size + 8;
+		sec_log_reserve_base = base - 12;
+		sec_log_reserve_size = size + 12;
 	}
-	return 1;
+	return 0;
 }
 
-__setup("sec_log=", sec_log_setup);
+early_param("sec_log", sec_log_setup);
 
 
 
