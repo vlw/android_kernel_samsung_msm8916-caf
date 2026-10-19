@@ -2345,6 +2345,10 @@ int tcp_disconnect(struct sock *sk, int flags)
 	__sk_dst_reset(sk);
 	dst_release(sk->sk_rx_dst);
 	sk->sk_rx_dst = NULL;
+	tp->segs_in = 0;
+	tp->segs_out = 0;
+	tp->bytes_acked = 0;
+	tp->bytes_received = 0;
 
 	WARN_ON(inet->inet_num && !icsk->icsk_bind_hash);
 
@@ -2716,7 +2720,7 @@ EXPORT_SYMBOL(compat_tcp_setsockopt);
 #endif
 
 /* Return information about state of tcp endpoint in API format. */
-void tcp_get_info(const struct sock *sk, struct tcp_info *info)
+void tcp_get_info(struct sock *sk, struct tcp_info *info)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
 	const struct inet_connection_sock *icsk = inet_csk(sk);
@@ -2780,6 +2784,22 @@ void tcp_get_info(const struct sock *sk, struct tcp_info *info)
 	info->tcpi_rcv_space = tp->rcvq_space.space;
 
 	info->tcpi_total_retrans = tp->total_retrans;
+
+	info->tcpi_pacing_rate = ACCESS_ONCE(sk->sk_pacing_rate);
+	if (info->tcpi_pacing_rate == ~0U)
+		info->tcpi_pacing_rate = ~0ULL;
+	/* This kernel has no SO_MAX_PACING_RATE / per-socket pacing cap. */
+	info->tcpi_max_pacing_rate = ~0ULL;
+
+	/* Also used by inet_diag without the socket user lock. In particular,
+	 * protect the 64-bit byte counters against torn reads on ARM32.
+	 */
+	spin_lock_bh(&sk->sk_lock.slock);
+	info->tcpi_bytes_acked = tp->bytes_acked;
+	info->tcpi_bytes_received = tp->bytes_received;
+	info->tcpi_segs_out = tp->segs_out;
+	info->tcpi_segs_in = tp->segs_in;
+	spin_unlock_bh(&sk->sk_lock.slock);
 
 	if (sk->sk_socket) {
 		struct file *filep = sk->sk_socket->file;
