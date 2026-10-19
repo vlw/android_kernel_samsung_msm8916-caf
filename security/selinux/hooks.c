@@ -42,6 +42,7 @@
 #include <linux/spinlock.h>
 #include <linux/syscalls.h>
 #include <linux/dcache.h>
+#include <linux/kernfs.h>
 #include <linux/file.h>
 #include <linux/fdtable.h>
 #include <linux/namei.h>
@@ -436,6 +437,7 @@ static int sb_finish_set_opts(struct super_block *sb)
 	if (!strcmp(sb->s_type->name, "sysfs") ||
 	    !strcmp(sb->s_type->name, "pstore") ||
 	    !strcmp(sb->s_type->name, "debugfs") ||
+	    !strcmp(sb->s_type->name, "bpf") ||
 	    !strcmp(sb->s_type->name, "rootfs"))
 		sbsec->flags |= SE_SBLABELSUPP;
 
@@ -712,6 +714,9 @@ static int selinux_set_mnt_opts(struct super_block *sb,
 
 	if (!strcmp(sb->s_type->name, "debugfs") ||
 	    !strcmp(sb->s_type->name, "sysfs") ||
+	    !strcmp(sb->s_type->name, "cgroup") ||
+	    !strcmp(sb->s_type->name, "cgroup2") ||
+	    !strcmp(sb->s_type->name, "bpf") ||
 	    !strcmp(sb->s_type->name, "pstore"))
 		sbsec->flags |= SE_SBGENFS;
 
@@ -1230,6 +1235,30 @@ static int selinux_genfs_get_sid(struct dentry *dentry,
 	return rc;
 }
 
+/*
+ * cgroup migration checks the common ancestor's cgroup.procs inode directly,
+ * before that file necessarily has a VFS dentry.  kernfs still has its full
+ * path; use it for the same genfs policy lookup rather than leaving the inode
+ * unlabeled.  Looking up dentries here would invert cgroup/VFS mkdir locks.
+ */
+static int selinux_kernfs_get_sid(struct inode *inode, u16 tclass, u32 *sid)
+{
+	char *path;
+	int rc;
+
+	path = (char *)__get_free_page(GFP_KERNEL);
+	if (!path)
+		return -ENOMEM;
+	rc = kernfs_path(inode->i_private, path, PAGE_SIZE);
+	if (rc >= PAGE_SIZE)
+		rc = -ENAMETOOLONG;
+	else if (rc >= 0)
+		rc = security_genfs_sid(inode->i_sb->s_type->name, path,
+					tclass, sid);
+	free_page((unsigned long)path);
+	return rc;
+}
+
 /* The inode's security attributes must be initialized before first use. */
 static int inode_doinit_with_dentry(struct inode *inode, struct dentry *opt_dentry)
 {
@@ -1403,12 +1432,16 @@ static int inode_doinit_with_dentry(struct inode *inode, struct dentry *opt_dent
 			 * inode_doinit() with a dentry, before these inodes
 			 * could be used again by userspace.
 			 */
-			if (!dentry)
-				goto out_unlock;
 			isec->sclass = inode_mode_to_security_class(inode->i_mode);
-			rc = selinux_genfs_get_sid(dentry, isec->sclass,
-						   sbsec->flags, &sid);
-			dput(dentry);
+			if (!dentry) {
+				if (!kernfs_root_from_sb(inode->i_sb))
+					goto out_unlock;
+				rc = selinux_kernfs_get_sid(inode, isec->sclass, &sid);
+			} else {
+				rc = selinux_genfs_get_sid(dentry, isec->sclass,
+							   sbsec->flags, &sid);
+				dput(dentry);
+			}
 			if (rc)
 				goto out_unlock;
 			isec->sid = sid;
@@ -2815,6 +2848,14 @@ static int selinux_inode_permission(struct inode *inode, int mask)
 
 	sid = cred_sid(cred);
 	isec = inode->i_security;
+	/* Direct kernfs inode users do not pass through d_instantiate(). */
+	if (unlikely(!isec->initialized) && kernfs_root_from_sb(inode->i_sb)) {
+		if (flags & MAY_NOT_BLOCK)
+			return -ECHILD;
+		rc = inode_doinit(inode);
+		if (rc)
+			return rc;
+	}
 
 	rc = avc_has_perm_noaudit(sid, isec->sid, isec->sclass, perms, 0, &avd);
 	audited = avc_audit_required(perms, &avd, rc,
