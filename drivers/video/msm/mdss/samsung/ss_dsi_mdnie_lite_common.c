@@ -745,10 +745,10 @@ static ssize_t hmt_color_temperature_store(struct device *dev,
 	return size;
 }
 
-static DEVICE_ATTR(mode_max, 0664, mode_max_show, NULL);
-static DEVICE_ATTR(scenario_max, 0664, scenario_max_show, NULL);
-static DEVICE_ATTR(outdoor_max, 0664, outdoor_max_show, NULL);
-static DEVICE_ATTR(accessibility_max, 0664, accessibility_max_show, NULL);
+static DEVICE_ATTR(mode_max, 0444, mode_max_show, NULL);
+static DEVICE_ATTR(scenario_max, 0444, scenario_max_show, NULL);
+static DEVICE_ATTR(outdoor_max, 0444, outdoor_max_show, NULL);
+static DEVICE_ATTR(accessibility_max, 0444, accessibility_max_show, NULL);
 
 static DEVICE_ATTR(mode, 0664, mode_show, mode_store);
 static DEVICE_ATTR(scenario, 0664, scenario_show, scenario_store);
