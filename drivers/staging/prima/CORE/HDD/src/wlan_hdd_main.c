@@ -307,7 +307,7 @@ static int __hdd_netdev_notifier_call(struct notifier_block * nb,
                                          void *ndev)
 {
    struct net_device *dev = ndev;
-   hdd_adapter_t *pAdapter = WLAN_HDD_GET_PRIV_PTR(dev);
+   hdd_adapter_t *pAdapter;
    hdd_context_t *pHddCtx;
 #ifdef WLAN_BTAMP_FEATURE
    VOS_STATUS status;
@@ -322,6 +322,16 @@ static int __hdd_netdev_notifier_call(struct notifier_block * nb,
    if (!dev->ieee80211_ptr)
       return NOTIFY_DONE;
 
+   /* Only these events require a live HDD adapter. In particular,
+    * netdev_run_todo() sends NETDEV_UNREGISTER_FINAL (and may replay
+    * NETDEV_UNREGISTER) after hdd_uninit() has invalidated the adapter
+    * and cleared pHddCtx.
+    * Do not inspect torn-down private state for an event we do not use.
+    */
+   if (state != NETDEV_CHANGE && state != NETDEV_GOING_DOWN)
+      return NOTIFY_DONE;
+
+   pAdapter = WLAN_HDD_GET_PRIV_PTR(dev);
    if (NULL == pAdapter)
    {
       hddLog(VOS_TRACE_LEVEL_FATAL,"%s: HDD Adapter Null Pointer", __func__);
@@ -344,18 +354,6 @@ static int __hdd_netdev_notifier_call(struct notifier_block * nb,
           __func__, dev->name, state);
 
    switch (state) {
-   case NETDEV_REGISTER:
-        break;
-
-   case NETDEV_UNREGISTER:
-        break;
-
-   case NETDEV_UP:
-        break;
-
-   case NETDEV_DOWN:
-        break;
-
    case NETDEV_CHANGE:
         if(TRUE == pAdapter->isLinkUpSvcNeeded)
            complete(&pAdapter->linkup_event_var);
