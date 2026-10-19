@@ -56,9 +56,18 @@ active. Unsupported tunnel helper functions from the donor have not been
 registered: programs requiring them are rejected rather than silently
 succeeding. Networking does not need them.
 
-BPF_EVENTS is disabled: the existing ktime_get() implementation provides the
-networking helper clock but is not NMI-safe. Do not enable tracing BPF without
-porting and validating the fast NMI-safe clock implementation first.
+BPF_EVENTS is enabled with the latched, NMI-safe CLOCK_MONOTONIC timekeeper
+backport. The BPF helper uses ktime_get_mono_fast_ns(), not the blocking
+ktime_get() reader. The ordinary timekeeper and fast reader share the same
+clocksource, conversion and monotonic base.
+
+Android's CPU tracker also requires two ABI details on this ARM32 target:
+sched_switch.prev_state is 64 bits, and cpufreq/policyN links follow the real
+policy kobject when CPU hotplug moves its owner. A static link to cpu0 would
+break when CPU0 goes offline. The final stopper-to-idle transition is traced
+before cpu_online is cleared; otherwise 3.10's offline tracepoint guard drops
+it and the active CPU counter grows on every hotplug cycle. The RCU safety
+guard itself remains intact.
 
 Validation
 ----------
@@ -78,6 +87,14 @@ for a real loopback UDP exchange.
 Run a3lte_bpf_probe --iface to exercise the netfilter interface counters
 with IPv4 and IPv6 UDP exchanges (35 and 55 bytes per direction). This
 regression test detects the QTAGUID/CLAT false match described above.
+
+Run a3_cpu_time_test with Android's tracker already running. It does not
+reattach programs or reset the shared maps. It checks policy discovery,
+active CPU counts within the physical four-CPU limit, and a short child
+workload under UID 29000. UID/frequency and PID/aggregation CPU time are
+compared against wait4() CPU usage; concurrency totals must equal UID totals.
+Repeat after automatic hotplug changes the active policy owner. These
+checks do not imply that CPU/memory controllers have migrated to cgroup v2.
 
 Compilation does not establish boot or runtime correctness. Device validation
 must additionally check bpfloader/netd logs, DNS requests, IPv4/IPv6 traffic

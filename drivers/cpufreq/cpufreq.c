@@ -816,6 +816,7 @@ static int cpufreq_add_dev_interface(struct cpufreq_policy *policy,
 				     struct device *dev)
 {
 	struct freq_attr **drv_attr;
+	char policy_name[24];
 	int ret = 0;
 
 	/* prepare interface data */
@@ -851,6 +852,20 @@ static int cpufreq_add_dev_interface(struct cpufreq_policy *policy,
 	ret = cpufreq_add_dev_symlink(policy);
 	if (ret)
 		goto err_out_kobj_put;
+
+	/* Keep Android's policyN discovery independent of the online owner CPU.
+	 * sysfs links follow the policy kobject when hotplug moves it.
+	 */
+	ret = cpufreq_get_global_kobject();
+	if (ret)
+		goto err_out_kobj_put;
+	snprintf(policy_name, sizeof(policy_name), "policy%u",
+		 cpumask_first(policy->related_cpus));
+	ret = sysfs_create_link(cpufreq_global_kobject, &policy->kobj, policy_name);
+	if (ret) {
+		cpufreq_put_global_kobject();
+		goto err_out_kobj_put;
+	}
 
 	return ret;
 
@@ -965,6 +980,12 @@ static void cpufreq_policy_put_kobj(struct cpufreq_policy *policy)
 {
 	struct kobject *kobj;
 	struct completion *cmp;
+	char policy_name[24];
+
+	snprintf(policy_name, sizeof(policy_name), "policy%u",
+		 cpumask_first(policy->related_cpus));
+	sysfs_remove_link(cpufreq_global_kobject, policy_name);
+	cpufreq_put_global_kobject();
 
 	blocking_notifier_call_chain(&cpufreq_policy_notifier_list,
 			CPUFREQ_REMOVE_POLICY, policy);

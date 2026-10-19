@@ -722,7 +722,9 @@ CONFIG_NET_SCH_INGRESS=y
 CONFIG_NET_CLS_BPF=y
 CONFIG_NET_ACT_BPF=y
 CONFIG_INET_UDP_DIAG=y
-# CONFIG_BPF_EVENTS is not set
+CONFIG_KPROBES=y
+CONFIG_KPROBE_EVENT=y
+CONFIG_BPF_EVENTS=y
 
 # Keep the previous built-in drivers when enabling the JIT module allocator.
 CONFIG_CP_ACCESS=y

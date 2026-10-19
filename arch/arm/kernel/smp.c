@@ -25,6 +25,7 @@
 #include <linux/clockchips.h>
 #include <linux/completion.h>
 #include <linux/cpufreq.h>
+#include <trace/events/sched.h>
 
 #include <linux/atomic.h>
 #include <asm/smp.h>
@@ -166,6 +167,14 @@ int __cpuinit __cpu_disable(void)
 	ret = platform_cpu_disable(cpu);
 	if (ret)
 		return ret;
+
+	/* The final stopper -> idle switch happens after cpu_online is cleared,
+	 * when 3.10 tracepoints deliberately stop running (RCU safety). Report
+	 * this real transition at the offline boundary while tracing is safe,
+	 * so sched_switch consumers can close this CPU's active interval.
+	 */
+	if (current != idle_task(cpu))
+		trace_sched_switch(current, idle_task(cpu));
 
 	/*
 	 * Take this CPU offline.  Once we clear this, we can't return,
