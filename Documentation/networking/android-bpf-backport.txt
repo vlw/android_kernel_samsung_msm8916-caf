@@ -1,0 +1,85 @@
+Android network BPF on msm8916
+=============================
+
+This tree backports the networking BPF ABI needed by Android 12 netd and
+DnsResolver while retaining the 3.10 kernel version. This is a networking
+backport, not a claim that every feature of a newer Linux kernel exists.
+
+The principal backport series is from acroreiser/android_kernel_lenovo_a6010,
+lineage-20.0 (donor revision cc77c080ed0). It includes the upstream classic-BPF
+to eBPF conversion, verifier, map implementations, bpffs, cgroup network hooks,
+ARM JIT and their prerequisite cgroup/kernfs changes. Socket destruction
+notifications follow upstream Linux v4.9 sock_diag. Existing A3 TCP_INFO
+counters, BFQ controller, memcg implementation and Samsung device drivers
+are retained and adapted to the new interfaces.
+
+Integration
+-----------
+
+lineageos_a3_defconfig enables BPF_SYSCALL, CGROUP_BPF, SOCK_CGROUP_DATA,
+NETFILTER_XT_MATCH_BPF, NETFILTER_XT_MATCH_OWNER, NET_CLS_BPF, NET_ACT_BPF,
+NET_SCH_INGRESS and UDP socket
+diagnostics. Modules are enabled for the executable-memory allocator used
+by ARM JIT; the previous built-in drivers remain built in.
+
+Android already mounts bpffs and the cgroup v2 hierarchy. The A3 vendor init
+library overrides ro.kernel.ebpf.supported=true, allowing the existing BPF
+loader to load netd programs. An older installed init binary with the common
+false property will still skip those programs even if this kernel is flashed.
+The matching device init change must therefore also be included in the ROM.
+The legacy init.qcom.rc v1 processgroup mount runs only when this property
+is false, so it cannot hide the cgroup v2 mount on backported kernels.
+No NetworkStack, netd, resolver or framework source changes are required.
+
+QTAGUID must be disabled for this configuration. Its legacy owner matcher
+treats PRE_ROUTING/POST_ROUTING as accounting-only hooks and returns a match
+without checking the requested UID. Android 12 uses owner UID 1029 in
+POST_ROUTING to exempt CLAT before its BPF interface counter. With QTAGUID
+this rule incorrectly exempts every outgoing packet, leaving interface TX
+at zero even though cgroup/UID counters work. The standard owner matcher
+provides the required UID matching; BPF replaces the legacy accounting.
+
+SO_COOKIE and BPF_FUNC_get_socket_cookie share one atomic, per-network-namespace
+cookie generator. Cookies are stable across dup and remain available until
+socket destruction; cloned sockets get distinct cookies. Socket UID is kept
+in the socket, including after orphaning. SOCK_DIAG broadcasts TCP/UDP IPv4
+and IPv6 destruction events before final destruction so netd can remove tags.
+BPF map counters use real atomic updates, including 64-bit XADD on ARM32.
+Programs containing instructions not supported by ARM JIT can execute in the
+eBPF interpreter; BPF_JIT_ALWAYS_ON is deliberately disabled.
+
+Unprivileged map creation and program loading default to disabled. Access
+to existing objects remains governed by descriptor/path permissions and LSM
+hooks, allowing netd to use bpfloader-created objects without CAP_SYS_ADMIN.
+Verifier and SELinux checks remain
+active. Unsupported tunnel helper functions from the donor have not been
+registered: programs requiring them are rejected rather than silently
+succeeding. Networking does not need them.
+
+BPF_EVENTS is disabled: the existing ktime_get() implementation provides the
+networking helper clock but is not NMI-safe. Do not enable tracing BPF without
+porting and validating the fast NMI-safe clock implementation first.
+
+Validation
+----------
+
+Build the normal bootimage and init targets, plus a3lte_bpf_probe. The probe
+is deliberately not included in PRODUCT_PACKAGES. After a separately approved
+boot of the matching kernel and ROM, run it as root. It checks cookie ABI,
+hash maps, pin/reopen, verifier rejection and a real loopback UDP packet in
+an isolated child cgroup, matching its cookie/UID and atomic packet count.
+The probe detaches its program and removes its own cgroup and pin afterwards.
+If netd already protects the parent cgroup, the isolated override test is
+explicitly skipped. Run a3lte_bpf_probe --netd to verify the active netd
+programs instead: it checks TCP/UDP IPv4/IPv6 tag creation and automatic
+destruction cleanup, then verifies exact RX/TX packet and byte increments
+for a real loopback UDP exchange.
+
+Run a3lte_bpf_probe --iface to exercise the netfilter interface counters
+with IPv4 and IPv6 UDP exchanges (35 and 55 bytes per direction). This
+regression test detects the QTAGUID/CLAT false match described above.
+
+Compilation does not establish boot or runtime correctness. Device validation
+must additionally check bpfloader/netd logs, DNS requests, IPv4/IPv6 traffic
+accounting and removal of cookie tags after sockets close. No reboot or
+flashing is necessary merely to build these changes.
