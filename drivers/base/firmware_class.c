@@ -293,7 +293,10 @@ static const char * const fw_path[] = {
 	"/lib/firmware/updates",
 	"/lib/firmware/" UTS_RELEASE,
 	"/lib/firmware",
-	"/firmware/image"
+	"/firmware/image",
+	/* Samsung stores signed modem segments on a separate firmware volume. */
+	"/firmware-modem/image",
+	"/vendor/firmware"
 };
 
 /*
@@ -357,6 +360,8 @@ static bool fw_get_filesystem_firmware(struct device *device,
 	int i;
 	bool success = false;
 	char *path = __getname();
+	if (!path)
+		return false;
 
 	for (i = 0; i < ARRAY_SIZE(fw_path); i++) {
 		struct file *file;
