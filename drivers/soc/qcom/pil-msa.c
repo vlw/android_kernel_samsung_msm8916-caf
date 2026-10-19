@@ -210,7 +210,7 @@ static int pil_mss_restart_reg(struct q6v5_data *drv, u32 mss_restart)
 			pr_err("Secure MSS restart failed\n");
 	}
 
-	return ret;
+	return ret ? ret : (scm_ret ? -EIO : 0);
 }
 
 static int pil_msa_wait_for_mba_ready(struct q6v5_data *drv)
@@ -284,6 +284,7 @@ int __pil_mss_deinit_image(struct pil_desc *pil, bool err_path)
 	struct modem_data *drv = dev_get_drvdata(pil->dev);
 	struct q6v5_data *q6_drv = container_of(pil, struct q6v5_data, desc);
 	int ret = 0;
+	int shutdown_ret;
 	s32 status;
 
 	if (err_path) {
@@ -294,22 +295,27 @@ int __pil_mss_deinit_image(struct pil_desc *pil, bool err_path)
 			POLL_INTERVAL_US, pbl_mba_boot_timeout_ms * 1000);
 		if (ret)
 			dev_err(pil->dev, "MBA region unlock timed out\n");
-		else if (status < 0)
+		else if (status < 0) {
 			dev_err(pil->dev, "MBA unlock returned err status: %d\n",
 						status);
+			ret = -EIO;
+		}
 	}
 
-	ret = pil_mss_shutdown(pil);
+	shutdown_ret = pil_mss_shutdown(pil);
+	if (!ret)
+		ret = shutdown_ret;
 
 	if (q6_drv->ahb_clk_vote)
 		clk_disable_unprepare(q6_drv->ahb_clk);
 
-	/* In case of any failure where reclaim MBA memory
-	 * could not happen, free the memory here */
-	if (drv->q6->mba_virt)
+	/* Free only after the MBA has confirmed that XPU protection is gone. */
+	if (!ret && drv->q6->mba_virt) {
 		dma_free_attrs(&drv->mba_mem_dev, drv->q6->mba_size,
 				drv->q6->mba_virt, drv->q6->mba_phys,
 				&drv->attrs_dma);
+		drv->q6->mba_virt = NULL;
+	}
 	return ret;
 }
 
@@ -631,7 +637,7 @@ static int pil_msa_mba_auth(struct pil_desc *pil)
 		ret = -EINVAL;
 	}
 
-	if (drv->q6 && drv->q6->mba_virt) {
+	if (!ret && drv->q6 && drv->q6->mba_virt) {
 		/* Reclaim MBA memory. */
 		dma_free_attrs(&drv->mba_mem_dev, drv->q6->mba_size,
 					drv->q6->mba_virt, drv->q6->mba_phys,
@@ -641,7 +647,8 @@ static int pil_msa_mba_auth(struct pil_desc *pil)
 
 	if (ret)
 		modem_log_rmb_regs(drv->rmb_base);
-	if (q6_drv->ahb_clk_vote)
+	/* Failure cleanup still needs the AHB registers to request an unlock. */
+	if (!ret && q6_drv->ahb_clk_vote)
 		clk_disable_unprepare(q6_drv->ahb_clk);
 
 	return ret;

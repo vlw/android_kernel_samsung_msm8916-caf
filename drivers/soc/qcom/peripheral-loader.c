@@ -132,6 +132,8 @@ struct pil_priv {
 	int id;
 	int unvoted_flag;
 	size_t region_size;
+	/* Failed hardware cleanup: pages must not re-enter the Linux allocator. */
+	bool region_quarantined;
 };
 
 /**
@@ -678,6 +680,11 @@ int pil_boot(struct pil_desc *desc)
 	const struct firmware *fw;
 	struct pil_priv *priv = desc->priv;
 
+	if (priv->region_quarantined) {
+		pil_err(desc, "Firmware memory remains protected; reboot required\n");
+		return -EIO;
+	}
+
 	/* Reinitialize for new image */
 	pil_release_mmap(desc);
 
@@ -757,8 +764,19 @@ int pil_boot(struct pil_desc *desc)
 	}
 	pil_info(desc, "Brought out of reset\n");
 err_deinit_image:
-	if (ret && desc->ops->deinit_image)
-		desc->ops->deinit_image(desc);
+	if (ret && desc->ops->deinit_image) {
+		int cleanup_ret = desc->ops->deinit_image(desc);
+
+		if (cleanup_ret) {
+			/* Reusing pages still owned by the peripheral/XPU can
+			 * abort unrelated userspace accesses, including init.
+			 */
+			priv->region_quarantined = true;
+			pil_err(desc, "Cleanup failed (%d); retaining firmware memory\n",
+				cleanup_ret);
+			ret = cleanup_ret < 0 ? cleanup_ret : -EIO;
+		}
+	}
 err_boot:
 	if (ret && desc->proxy_unvote_irq)
 		disable_irq(desc->proxy_unvote_irq);
@@ -767,7 +785,7 @@ release_fw:
 	release_firmware(fw);
 out:
 	up_read(&pil_pm_rwsem);
-	if (ret) {
+	if (ret && !priv->region_quarantined) {
 		if (priv->region) {
 			dma_free_attrs(desc->dev, priv->region_size,
 					priv->region, priv->region_start,
