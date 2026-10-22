@@ -1,0 +1,297 @@
+SM-A300F stock-source and shared-memory audit (2026-10-22)
+========================================================
+
+Reference
+---------
+Repository:
+ https://github.com/vlw/DEPRECATED_stock_android_kernel_samsung_msm8916_A3
+Import baseline:
+ 7be17db723f426b4181a7c91bce353a4a536f282 (Initial commit, 2016-10-03)
+The downloaded reference checkout is detached at this commit. The 950 later
+commits on master are excluded from the baseline. This import is Linux 3.10.49;
+it is not assumed to be the exact GPL release corresponding to BRH1 (2018).
+The findings below are cross-checked against the actual SM-A300F BRH1 boot DTB
+and the BTI3 handset's current boot DTB. See memshare-a3-stock.txt for binary
+hashes, recovered symbol addresses and the earlier memory-handler audit.
+
+Source equality and functional differences
+------------------------------------------
+The following source files are byte-identical in the import and current tree:
+ drivers/uio/msm_sharedmem/msm_sharedmem.c
+ drivers/uio/msm_sharedmem/remote_filesystem_access_v01.{c,h}
+ drivers/uio/msm_sharedmem/sharedmem_qmi.h
+ drivers/soc/qcom/qmi_interface.c, qmi_interface_priv.h
+ drivers/soc/qcom/smd_init_dt.c, smd_private.c, smd_private.h, smem_private.h
+ drivers/soc/qcom/memshare/heap_mem_ext_v01.{c,h}, msm_memshare.h
+ include/soc/qcom/smd.h, msm_qmi_interface.h
+ include/linux/qmi_encdec.h
+ net/ipc_router/ipc_router_security.c
+ drivers/misc/gpio_settings.c
+
+SMEM core differs in debug/ramdump visibility and uninitialized debug-argument
+fixes, not the shared-memory allocator/lookup protocol. SMD adds two reopen/SSR
+fixes (1a8e1b8de264, 4a2164ae9831): resetting current_packet when reopening and
+waiting for the peer to acknowledge the previous state. IPC SMD transport adds
+8d8240587da7 to discard stale partial packets after SSR. These changes repair
+transport races; no GNSS gain/GPIO/voltage selection was added or removed there.
+
+Sharedmem QMI differs only in debug-buffer synchronization (2710ab6ef48d),
+fixing a debugfs use-after-free. IPC router adds client-port validation and
+socket/error-path/lookup-output fixes. The core QMI implementation, RFSA wire
+descriptions and security table are unchanged. The earlier runtime GPS trace
+successfully executed all 14 observed IPC Router ioctls.
+
+A3 Rev01 DT comparison
+---------------------
+msm8916-sec-a3-eur-r01.dts from the clean import was preprocessed and compiled.
+Properties were compared after resolving supply, clock, pinctrl and GPIO
+phandles to node paths, avoiding false differences from phandle numbering.
+87 selected memory/modem/IPC/RPM/SMP2P nodes were compared across import DTB,
+actual BRH1 DTB and current boot DTB; 83 are equal.
+
+Equal nodes include SMEM and its memory/IRQ registers, all sharedmem UIO
+regions, memshare including its 2-MiB child, MSS supplies/clocks/GPIO references,
+SMP2P/SMSM, and L18's voltage/resource settings. The separate /memory
+comparison is detailed below. The import Rev01 root model
+string says Rev00; current source fixes this cosmetic typo (16f8807efc88).
+The actual board-id and node resources are the relevant selection evidence.
+
+The four differing selected nodes are:
+ 1. MSS MBA child: current adds qcom,pil-mba-mem and a CMA region reference.
+    CAF b9735050cd38 introduces this MBA-specific pool. The Samsung DT copy
+    imports the corresponding node in ad42c76580ad. It is paired with the
+    newer MBA/PIL driver, not a replacement GNSS antenna/pin definition.
+ 2. SMD modem: current adds qcom,not-loadable. CAF d53dbc04e492 intentionally
+    moves modem power-on ownership from SMD/IPC subsystem_get calls to the
+    userspace peripheral manager. The Samsung copy contains this from
+    ad42c76580ad. This flag does not disable the modem itself: on the handset
+    the modem is ONLINE and qmuxd holds the SMD control channels.
+ 3. IPC modem transport: current adds qcom,disable-pil-loading, paired with
+    the SMD change above in CAF d53dbc04e492 and the Samsung DTS import.
+ 4. L5: current maximum is 1850000 rather than 1800000 microvolts. This arrives
+    with ad42c76580ad; that import supplies no separate explanation for L5.
+    Initial voltage remains 1800000. Visible consumers are SD I/O, WCNSS,
+    sensors and audio, so the max value alone is not proof of a GNSS voltage
+    mismatch. L18 is identical. No speculative voltage edit was made.
+
+The separate /memory comparison has seven matching nodes out of eleven.
+Modem/ADSP, peripheral, Venus, QSEE, audio and splash regions match. Differences:
+ - external_image_mem changes from 0x85a00000/14 MiB to 0x85500000/19 MiB.
+   Both end at 0x86800000, so this does not move the modem or RFSA regions.
+   The imported source comment attributes the reservation to TIMA/TZ size.
+ - secure_mem grows from 50 to 109 MiB; there is no separate rationale in the
+   importing commit. This is a dynamic secure CMA pool, not the memshare buffer.
+ - a 2-MiB MBA CMA pool is added, paired with the MBA loader change above.
+ - a 1-MiB pstore reserve at 0x9ff00000 is added in the Samsung DT.
+All four are already present in ad42c76580ad. These DT observations do not
+establish all reservations made by stock kernel code or the bootloader.
+Their effects on available AP/secure memory should be distinguished from RF
+sensitivity; no reception benefit from changing these areas was demonstrated.
+The existing kernel's earlier persistent-log reservation fix remains intact.
+
+The comparison is limited to the selected nodes; it does not claim that all
+camera, display, CPU or other board properties match the older import.
+
+Where the confirmed memshare mismatch entered
+---------------------------------------------
+CAF 94df37705b5c (2014-10-30) renames memshare,peripheral to
+qcom,memshare-peripheral in BOTH the driver and Qualcomm's 8916/8939 DTS.
+That upstream change is internally consistent. Samsung's older DTS still
+uses the legacy spelling, matching the imported stock driver.
+
+Current ad42c76580ad (2019-05-10, dts: samsung_msm8916) imports Samsung DTS
+with the OLD compatible into a tree with the NEW CAF driver. This combination
+breaks child matching. The local DTS fix changes the shared Samsung msm8916.dtsi
+child to qcom,memshare-peripheral. The driver's legacy alias remains useful for
+older DTBs. Neither fix changes the stock board's buffer size or memory layout.
+
+CAF 4493220fa7f5 (2014-06-23) introduces boot reservation and multiple clients,
+but its generic response allocation has no kfree. The Samsung import and
+actual stock binary have that free. The CAF-derived tree did not carry this
+vendor fix; it was not removed by a recent GNSS change. CAF 336b5349fc8d later
+adds a full-table bounds check but returns without unlocking or releasing the
+response. Both paths are covered by the local fixes and regression tests.
+The source import also confirms that legacy fallback bookkeeping defects are
+inherited from stock, rather than evidence that only our protocol is wrong.
+
+CAF 7e6c5b121857 adds DMA_ATTR_NO_KERNEL_MAPPING for XPU safety, and
+453532e4ad98 / 2614ff4ae877 delay dynamic memory cleanup until AFTER_POWERUP.
+These newer fixes are deliberately retained; see the preceding binary audit.
+The reference repository's later history does not modify memshare or sharedmem
+UIO, so those particular differences are not explained by its later tweaks.
+
+Live shared-memory status
+-------------------------
+CONFIG_MSM_SMEM, MSM_SMD, MSM_QMI_INTERFACE, UIO_MSM_SHAREDMEM and
+MEM_SHARE_QMI_SERVICE are enabled. Both stock's base defconfig and our actual
+config specify an 8-MiB default CMA size. Stock enables SMEM/SMD debug logging;
+our disabled logging options do not disable SMEM/SMD or these UIO devices.
+
+The running handset has all four registered UIO regions:
+ rmtfs:    0x86700000, size 0x000e0000
+ rfsa_dsp: 0x867e0000, size 0x00020000
+ rfsa_mdm: 0x867e0000, size 0x00020000
+ bimc:     0x00400000, size 0x00080000
+The two RFSA names intentionally share the same physical region, as in stock.
+rmt_storage is running and holds /dev/uio0. These are real bound devices,
+not just disabled DT descriptions. There is no observed missing sharedmem
+kernel interface here. The separately identified memshare child mismatch
+still exists in the running pre-fix kernel until a new kernel is loaded.
+
+Userspace RFSA is a separate, unproven difference
+-----------------------------------------------
+Actual BRH1 init starts /system/bin/rfs_access as root with system/net_raw.
+Its paths include /system/rfs/msm/{adsp,mpss} and /data/rfs. Current userspace
+has no such binary/service/directory tree, and the kernel's RFSA startup
+counter is zero. RMT storage startup counter is one; these are separate
+services and counters. A zero buffer-lookup count is NOT proof that no remote
+filesystem I/O has ever occurred, because userspace can find the UIO map
+without calling the kernel's buffer-lookup QMI service.
+
+The device-history cause is bfb60b7f114e68291ebbe96a09d5f7dea1efe298,
+"init: disable rfs_access on 8939" (2016-08-10). Its stated reason is that the
+service is for internal use and should not ship in the final product. The
+patch removes the common init service unconditionally, affecting this shared
+MSM8916 device configuration too. This is a deliberate CAF-derived policy
+change, not proof of an accidental kernel driver deletion.
+
+It remains unknown whether this particular Samsung CP needs RFSA for any
+normal GNSS feature. No requests/files demonstrating such a dependency were
+captured. Presence in stock alone is insufficient to present an old root RFSA
+server as a verified GNSS repair. The daemon was extracted for static analysis
+but was not installed or started. No CP restart or reboot was performed.
+
+Artifacts and reproducibility
+-----------------------------
+Reference checkout: out/gps-diagnostics/stock-a3-source (detached import).
+Comparison files: out/gps-diagnostics/2026-10-22/stock-source-analysis/
+ import-rev01.preprocessed.dts, import-rev01.dtb
+ compare_dtb.py, dt-critical-comparison.json, dt-*-normalized.json
+ file-matrix.json, memshare-source-import.diff (in sibling rf-compare)
+ RFSA static binary extraction and focused source diffs
+The generated DT warnings concern existing camera I2C reg/address-cells;
+those warnings were not interpreted as GNSS/shared-memory errors.
+Findings and fixes remain local. No commit, push, reboot or modem restart was
+done during this source-reference comparison.
+
+Follow-up: purpose and current necessity (2026-10-22)
+--------------------------------------------------
+RFSA is remote filesystem access for the DSP/modem, not a radio gain setting.
+Static analysis of the actual BRH1 rfs_access executable finds ADSP:// and
+MPSS:// paths, file lookup/stat, read, write-iovec, shared UIO buffer discovery
+and QMI request dispatch. Stock maps readwrite/shared into /data/rfs, firmware
+into /firmware, and mpss/ramdumps into /data/tombstones/modem. This is distinct
+from rmt_storage's modem remote block-storage service. It is also distinct
+from the kernel RFSA GET_BUFF_ADDR service, which describes shared memory,
+not the entire userspace file-operation protocol. Stock init starts the
+daemon as root; its getuid/setuid/capset/prctl imports mean init credentials
+alone do not prove its credentials throughout its lifetime.
+
+The historical reason for removal is documented above. It is not a measured
+proof that Samsung's CP never uses RFSA. Conversely, working modem/GNSS QMI and
+NMEA without this service show it is not required for those observed paths;
+this does not establish that every GNSS feature works without it.
+No observed GNSS file request establishes a missing optional dependency.
+Restoring it as a confirmed reception fix would therefore be unsupported.
+
+The enlarged reservations are in OUR Samsung DT, already at ad42c76580ad,
+not in the clean import/BRH1 DT. All sizes here use binary MiB:
+                         stock             current
+ external_image_mem      14 @ 0x85a00000    19 @ 0x85500000
+ secure_mem CMA          50                109
+ mba_mem CMA             absent            2
+ pstore_reserve_mem      absent in DT      1 @ 0x9ff00000
+ default global CMA      8                 8
+TIMA/TZ share the external_image reservation; they are not extra independent
+regions to add to this table. Its upper boundary remains 0x86800000. These
+values do not move the matching modem/ADSP or RFSA regions. The source comment
+indicates TIMA/TZ intent but does not establish an exact per-component size or
+prove the additional 5 MiB necessary for this handset's secure firmware.
+
+secure_mem is ION heap 8 (CP_MM), type SECURE_DMA. The DT does not mark it
+remove-completely or reserve-region. The CMA allocator keeps it in the Linux
+memory system. ion_cma_secure_heap_create initializes metadata, not a full
+109-MiB DMA allocation; allocation/prefetch acquires chunks later, and a
+shrinker can return unused chunks. Live /sys/kernel/debug/ion/heaps/mm reports
+allocated=0, pool=0, leaked=0 at this observation. Thus 109 MiB is pool capacity,
+not evidence that 109 MiB is permanently unavailable. The 50-to-109 increase
+has no A3-specific justification in the import; reducing it could affect
+protected multimedia and requires workload/secure-firmware validation.
+
+mba_mem supplies the newer PIL MBA loader/authentication and metadata DMA
+allocations. Removing this pool independently of that driver is inappropriate.
+The 1-MiB pstore node has no corresponding enabled ramoops consumer in the A3
+DT. Live ramoops mem_address and mem_size are both zero and its driver has no
+bound device. This is an apparently unused reservation, not proof of working
+pstore. It is separate from Samsung sec_log: the bootloader supplies
+sec_log=0x100000@0xafe00008 and the kernel reserves that buffer independently.
+Removing the unused DT pstore area would be RAM cleanup, not a GNSS RF fix;
+no memory-layout changes were made as part of this targeted memshare repair.
+
+Modem boot ownership is present in the actual current configuration: early
+boot init.qcom.rc writes 1 to /sys/kernel/boot_adsp/boot. The DT's adsp-loader
+has qcom,proc-img-to-load="modem", so adsp_loader_do calls subsystem_get("modem")
+and retains pil_h. The actual stock BRH1 init/DT have this explicit path too.
+In addition, the running GNSS service (PID 14698 at observation) holds fd 22
+to /dev/subsys_modem; open/close in subsystem_restart.c get/put the modem.
+Therefore absence of a running per_mgr daemon does not imply a missing owner.
+Stock additionally permits SMD/IPC demand loading. Current DT suppresses those
+transport votes, following CAF d53dbc04e492. Explicit boot plus subsystem
+references already keep the modem ONLINE. Re-enabling demand loading is not
+shown necessary and cannot increase RF gain on an already running modem.
+These flags do not disable IPC transport or the PIL modem driver.
+
+Three DTBs were independently preprocessed, compiled and parsed after the fix:
+ msm8916-sec-a3-eur-r00   (SM-A300F Rev00)
+ msm8916-sec-a3-eur-r01   (SM-A300F Rev01)
+ msm8916-sec-a3u-eur-r01  (SM-A300FU Rev01)
+All contain qcom,memshare-peripheral, modem label, and the unchanged 2097152-byte
+buffer. One shared include fix covers all three; duplicating leaf overrides
+is unnecessary. The actual production-handler regression test also passes,
+and the complete a3lte zImage-dtb build succeeds with the corrected DTS.
+Artifacts: memshare-three-dtb-validation.json and *-memshare.dtb/dts/dtc.log
+under the source-analysis output directory. These are build-time checks;
+live binding and GNSS effect remain untested until a separately authorized
+kernel installation/reboot.
+
+User-authorized A3 memory reduction (2026-10-22)
+----------------------------------------------
+The user subsequently requested restoring stock memory sizes. A new A3-only
+msm8916-sec-a3-memory.dtsi, included after the common memory layout by the three
+A3/A3U DTS files listed above, now overrides external_image_mem to stock
+0x85a00000/14 MiB and secure_mem to stock 50 MiB. It deletes the unconsumed
+1-MiB pstore reservation. Other Samsung products keep their common defaults.
+The earlier sections describe the before-change comparison, not this new DT.
+
+The dedicated 2-MiB MBA pool remains an intentional exception to the old stock
+layout: it provides the current driver's explicit modem authentication DMA
+pool. The driver has a default-allocation fallback, but removing that pool
+would move allocations into competing global DMA/CMA memory; it is not needed
+to reclaim permanently excluded RAM. Default CMA remains 8 MiB. All memshare
+corrections and the guaranteed 2-MiB client buffer are retained.
+
+Expected fixed-reservation recovery is 5 MiB + 1 MiB = 6 MiB before accounting
+for any other boot-time layout effects. This is not a measured increase:
+no new kernel was installed or booted. Reducing secure CMA capacity by nominal
+59 MiB does not add 59 MiB to MemTotal because that memory was already in the
+Linux memory system. Runtime CMA sizes are rounded to allocator alignment
+(currently 4 MiB), so the requested 109/50 MiB pools become 112/52 MiB.
+Protected-video capacity and secure-firmware compatibility still require
+runtime validation; successful DT/kernel compilation cannot establish them.
+
+Independent compile/parse of all three variants verifies that the only node
+differences from the preceding corrected-memshare DTBs are external_image_mem,
+secure_mem and removal of pstore_reserve_mem. Modem, RFSA, other carveouts,
+MBA and memshare properties are unchanged. The actual production-handler
+memshare regression test passes. Artifacts are *-stock-memory.dtb/dts/dtc.log,
+a3-stock-memory-validation.json, and a3-stock-memory-kernel-build.log in the
+source-analysis output directory. No commits, pushes or reboots were made.
+
+Subsequent user correction: retain and activate pstore
+----------------------------------------------------
+The user requested a working pstore backend instead of deleting its reserve.
+The A3 include now keeps the 1-MiB common reservation and supplies ramoops,
+including console, panic/oops, Android pmsg and ECC. Thus the earlier removal
+and 6-MiB recovery estimate above are superseded: the expected fixed-reserve
+reduction relative to the initial tree is now 5 MiB (external_image_mem only).
+See a3-pstore.txt for layout, driver fixes, tests and runtime limitations.

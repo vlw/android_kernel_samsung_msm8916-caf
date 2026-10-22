@@ -1,0 +1,114 @@
+A3 persistent crash logs (ramoops)
+================================
+
+The common Samsung DT already reserves 1 MiB at 0x9ff00000, but previously
+there was no ramoops consumer. The A3-specific memory include now retains that
+reservation and adds a matching /soc/ramoops device for all three A3/A3U DTBs.
+The rest of the A3 stock memory-size overrides and memshare fixes are retained.
+
+Physical layout (end addresses exclusive, sizes include headers and ECC):
+ 0x9ff00000..0x9ff40000: 256 KiB panic/oops record
+ 0x9ff40000..0x9ffc0000: 512 KiB kernel console ring
+ 0x9ffc0000..0xa0000000: 256 KiB Android pmsg ring
+The optional persistent function tracer has no allocation and is disabled.
+This avoids enabling function tracing overhead for routine crash collection.
+ECC uses 16 Reed-Solomon symbols per default 128-byte block, plus header ECC.
+Usable payload is therefore smaller than the nominal section size.
+
+The old Android-prefixed ramoops binding is deliberately used: it is the
+binding implemented by this 3.10 driver. The buffer defaults to write-combining
+mapping; a strongly ordered mapping must not be selected on this ARM platform.
+linux,reserve-region and linux,remove-completely prevent normal allocation
+and a cached linear alias of the physical buffer. The live bootloader RAM
+bank covers 0x80000000..0xc0000000, including the entire ramoops buffer.
+Compile/parse checks on F Rev00, F Rev01 and FU Rev01 confirm exact matching
+reservation/consumer sizes and no overlap with other fixed DT reservations.
+Samsung sec_log/sec_dbg at approximately 0xafe00000/0xaff00000 are separate.
+
+Android integration
+-------------------
+PSTORE, PSTORE_RAM, PSTORE_CONSOLE and PSTORE_PMSG are already built in.
+Android init already mounts /sys/fs/pstore and ueventd grants /dev/pmsg0 its
+standard permissions. No system source changes are necessary. Device-owned
+init.target.rc remounts pstore with kmsg_bytes=262144 after the standard mount,
+increasing the crash snapshot limit from its 10-KiB default. The record is
+clamped to available payload, including the ramoops timestamp header and ECC.
+The mount builtin runs in the main init process (not vendor_init subcontext),
+whose existing policy permits the filesystem remount. Runtime Enforcing
+validation is still required; the connected phone currently runs Permissive.
+
+After a supported warm reset, previous-boot logs should appear as:
+ /sys/fs/pstore/console-ramoops-0
+ /sys/fs/pstore/dmesg-ramoops-0   (only after a panic/oops record exists)
+ /sys/fs/pstore/pmsg-ramoops-0
+Reading does not delete records. Unlinking acknowledges/removes a record.
+Ramoops is RAM-backed: it cannot promise persistence across power loss or a
+bootloader path that clears/reuses that RAM. Console/pmsg are circular tails,
+not complete unbounded logs. No phone panic or reset was induced for this work.
+
+Driver corrections required for robust activation
+-------------------------------------------------
+ - Propagate missing mandatory DT property errors; do not report false probe
+   success after an invalid/empty configuration.
+ - Restore platform-data support (including module-parameter dummy devices).
+ - Reject a second backend even when the first has only console/pmsg.
+ - Validate partition sizes and address arithmetic before mapping/subtraction.
+ - Bound cleanup by the actual record-array count, not a nonexistent sentinel.
+ - Unmap/free persistent zones on all probe failure paths and reset context so
+   a subsequent probe can succeed. Release the RS decoder and failed iomaps.
+ - Reset a crash slot before replacing it, preventing old tails in short logs.
+   Oversized records retain their newest bytes, so ECC/header overhead cannot
+   discard the panic backtrace at the end of the input.
+ - Resize saved snapshots before copying a larger record.
+ - Skip empty crash slots instead of hiding later populated records.
+ - Return a defined read count and reject erasure of an absent optional zone.
+ - Ignore the legacy direct console-write hook until its zone exists.
+
+Validation
+-----------
+Run tools/testing/selftests/pstore/ramoops_test.py on a host with ASan/UBSan.
+It extracts the actual production function bodies and tests reservation bounds,
+allocation/registration/mapping failures, cleanup/retry, record replacement,
+sparse reads, ring wrap, ECC-context release and recovery after reinitializing
+metadata while retaining a simulated physical RAM buffer. Mapping and ECC
+are mocked in this host test; it is not a hardware or ECC correctness test.
+The old cleanup body reproduces an ASan heap-buffer-overflow; the corrected
+production body passes. The existing memshare regression test also passes.
+
+Diagnostics and DT validation:
+ out/gps-diagnostics/2026-10-22/pstore/
+   dt-validation.json, three .dtb/.dts files and DTC logs
+   baseline-cleanup-reproduction.log
+   arm-kernel-build.log
+Further QEMU and handset results must be recorded separately rather than
+being inferred from successful host tests or a successful kernel build.
+
+QEMU test result (2026-10-22)
+----------------------------
+PASS: recovered console, panic/oops and pmsg records after an induced guest
+panic and automatic reboot. Before the panic, the host paused the guest and
+flipped one bit in the pmsg payload. After reboot, the original marker was
+recovered with "1 Corrected bytes, 0 unrecoverable blocks". The pstore mount
+used the same kmsg_bytes remount option as the A3 init configuration. A larger
+crash-context test recovered an 80232-byte crash record, exceeding the previous
+10-KiB default. The device init fragment also passes host_init_verifier.
+
+The test runs the byte-identical current fs/pstore/ram.c and ram_core.c (and
+the remaining current pstore sources/headers) in a 3.10.49 x86 test kernel
+derived from the clean stock import. ARM-only Samsung changes required an
+out-only compatibility header for unrelated x86 compilation. This is not
+an emulation of the A3 SoC, its write-combining implementation or bootloader.
+The guest uses the same 1-MiB layout/ECC settings at a test-only physical
+address of 0x02000000. Placing it at the top of guest RAM was unsuitable:
+the PC loader reused that area on reboot, demonstrating why retention needs
+an actual bootloader-specific check. The phone address remains 0x9ff00000.
+
+Reproduction artifacts under the diagnostics directory:
+ run_qemu.py, qemu-init, qemu-inittab, initramfs.list, initramfs.cpio
+ qemu-compat.h, qemu-stock-build/.config, qemu-stock-build.log
+ qemu-console.log (PSTORE_QEMU_PASS and the ECC recovery result)
+ qemu-stock-source/ (isolated test copy; the stock reference is unchanged)
+The test driver source hashes match the production tree. QEMU has exited.
+The A3 zImage-dtb also builds successfully. No kernel or init files were
+installed on the phone, and its boot ID is unchanged. Actual Samsung warm
+reset retention and Enforcing operation remain pending a handset test.

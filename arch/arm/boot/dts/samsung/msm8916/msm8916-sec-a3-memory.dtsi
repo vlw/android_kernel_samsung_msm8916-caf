@@ -13,6 +13,26 @@
 	reg = <0 0 0 0x03200000>;
 };
 
+/* Keep the common 1-MiB reservation at 0x9ff00000 out of the RAM allocator.
+ * Its matching ramoops mapping must use write-combining (mem-type 0).
+ * Samsung sec_log is a separate bootloader-selected persistent buffer.
+ */
+/ {
+	soc {
+		ramoops {
+			compatible = "ramoops";
+			android,ramoops-buffer-start = <0x9ff00000>;
+			android,ramoops-buffer-size = <0x00100000>;
+			android,ramoops-record-size = <0x00040000>;
+			android,ramoops-console-size = <0x00080000>;
+			android,ramoops-pmsg-size = <0x00040000>;
+			android,ramoops-ftrace-size = <0>;
+			android,ramoops-dump-oops = <1>;
+			android,ramoops-ecc-size = <16>;
+		};
+	};
+};
+
 /* Retain mba_mem: the current PIL loader uses this dedicated CMA pool for
  * modem authentication. It is reusable CMA, not permanently removed RAM.
  */
