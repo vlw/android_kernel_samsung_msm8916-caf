@@ -1,0 +1,161 @@
+SM-A300F memshare: stock binary comparison, 2026-10-22
+====================================================
+
+Reference and scope
+-------------------
+Reference archive: SAMFW.COM_SM-A300F_SER_A300FXXS1BRH1_fac.zip
+AP: AP_A300FXXS1BRH1_CL1182551_QB19263258_REV00_user_low_ship_MULTI_CERT
+CP: A300FXXU1BTI3
+Stock kernel: Linux 3.10.49-1182551, GCC 4.8, built 2018-08-07.
+This is SM-A300F, not the different SM-A300FU reference.
+
+boot.img SHA256:
+ baa4030b9cc620df4de902f176a4fae47b5224a51f32174259612d30875c406e
+Decompressed kernel SHA256:
+ 54ae80c508dd5c614ff574ab8ca9b07211ad3811b9fc79c0bd57fb0dc00bdd11
+The analyzed boot image was checked against boot.img read directly from the
+AP tar inside the supplied ZIP. ARM zImage's legacy LZ4 stream starts at
+file offset 6029. The reconstructed kernel ELF uses base 0xc0008000 and
+109517 names/addresses from its embedded kallsyms. This is a reconstructed
+analysis ELF, not a vendor-provided ELF or recovered original C source.
+No stock kernel/CP was booted during this comparison.
+
+Stock code locations (ARM virtual addresses)
+--------------------------------------------
+ check_client                         c04066f8
+ mem_share_svc_req_desc_cb             c04067c8
+ memshare_init_worker                 c04068bc
+ free_client                          c0406ad8
+ free_mem_clients                     c0406b20
+ modem_notifier_cb (memshare)          c0406bf8
+ fill_alloc_response                  c0406c70
+ initialize_client                    c0406cd0
+ memshare_probe                       c0406d24
+ memshare_alloc                       c0406e34
+ mem_share_svc_req_cb                  c0406f24
+ memshare_child_probe                 c040761c
+ memshare_match_table1                 c1157984
+ memblock (local array, not bootmem)    c1369630
+
+The request callback inlines its handlers:
+ 0x20 legacy allocation               c0406fa0 .. c04070cc
+ 0x21 legacy free                     c04070d0 .. c04071c8
+ 0x22 generic allocation              c04071cc .. c04073b8
+ 0x23 generic free                    c04073bc .. c0407578
+These ranges include shared response/error branches; they are not four
+independently callable C functions in this stock binary.
+
+Protocol and boot reservation
+-----------------------------
+Service ID 0x34, version 1, instance 1; qmi_svc_ops_options.version is 1.
+All eight request/response descriptors match the current compiled kernel,
+including message IDs, maximum encoded lengths, TLV tags, C field offsets,
+array counts and recursively referenced element descriptions. There is no
+observed wire-format divergence in these descriptors.
+
+The stock DT's memshare,peripheral child reserves 0x200000 bytes for modem
+GPS client 0. The stock of_device_id table actually contains that legacy
+compatible. CAF commit 94df37705b5c changed only the accepted compatible to
+qcom,memshare-peripheral, while this device retained the legacy DT spelling.
+Supporting both spellings restores matching without changing the stock DT.
+
+Stock initcall entries:
+ c1106e80 -> c102a848 memshare_pchild_init
+ c1106e84 -> c102a83c memshare_pdriver_init
+Thus the child driver is registered before parent probing in the stock
+binary. Do not infer initcall order from the order of C macro declarations.
+The current explicit registration preserves that order deterministically.
+The service is additionally published after initial client population; the
+stock parent queues its service work before initializing the global pool,
+so copying that timing literally would retain an initialization race.
+
+Stock child probing stores size/client/guarantee before DMA allocation and
+sets alloted after success. Without rollback, failed allocation can leave a
+nonzero size and guarantee despite no buffer. The current child probe builds
+a temporary record, publishes only after success, validates its label, and
+bounds the one-entry client_table before indexing it.
+
+Allocation and release
+----------------------
+Stock memshare_alloc calls the DMA allocator with NULL attributes (ordinary
+dma_alloc_coherent semantics). It stores physical and CPU addresses but does
+not itself set the slot size/alloted fields. Generic allocation does set them;
+legacy allocation does not. This legacy bookkeeping flaw exists in the stock
+fallback too, but the stock guaranteed reservation normally bypasses it.
+Do not describe it as a newly discovered difference unique to LineageOS.
+
+The legacy response copies requested num_bytes even when reusing a smaller
+preallocated buffer. The IDL explicitly permits returning fewer bytes; the
+fixed response is bounded by the actual buffer size. Legacy free in the stock
+fallback does not clear the record and trusts the supplied handle. The fixed
+path checks ownership/handle, matches DMA attributes and clears the record.
+
+In the stock generic handler c0407398..c040739c calls kfree after sending its
+heap-allocated response. That free was missing in the current source. CAF's
+later full-table guard (336b5349fc8d) also returned while still holding the
+pool mutex and leaked the response. The fixed error path sends a failure,
+unlocks, and releases the response on both successful and failed sends.
+Failure responses no longer advertise an unusable physical-address TLV.
+
+Both stock and the previous source passed sizeof(pointer) for the generic
+response length. This kernel's QMI encoder does not use that argument to
+select encoded fields, which explains why it worked. Passing sizeof(*response)
+corrects the API contract without changing the descriptor or wire format.
+
+Generic free accepts only the actual single allocation's address and size
+before releasing a dynamic slot. Guaranteed buffers remain reserved, as in
+stock. A single pool mutex serializes allocation, release and SSR cleanup.
+Legacy dynamic allocation records its GPS/modem identity so later lookup and
+SSR cleanup cannot mistake an occupied slot for a free client-table entry.
+
+Why two newer CAF behaviors are retained
+----------------------------------------
+1. DMA_ATTR_NO_KERNEL_MAPPING (7e6c5b121857) prevents AP virtual mapping of
+   modem-owned memory and was added for XPU violations. It does not suppress
+   the modem physical address, change GNSS antenna gain, or disable RF power.
+   Allocation/free use the same attributes. Reverting it just to copy stock
+   would reintroduce the documented XPU hazard.
+2. Stock modem_notifier_cb compares the event to 1. Stock restart-worker
+   disassembly c04117dc..c04117f8 emits event 1 after shutdown; events 2/3
+   bracket powerup at c0411860..c0411894. Thus stock cleans dynamic buffers at
+   AFTER_SHUTDOWN. CAF commits 453532e4ad98 and 2614ff4ae877 move cleanup to
+   AFTER_POWERUP so XPU protection has been removed. The later timing is kept.
+   Cleanup preserves guaranteed buffers and skips DMA free for failed/unallocated
+   registrations. No modem restart was performed to test this on hardware.
+
+Live evidence and limits
+------------------------
+The running pre-fix kernel bound the memshare parent, but its legacy-compatible
+child had no driver link. A read-only transient module found slot 0 with
+nonzero DMA cookies and size/alloted/guarantee zero; this matches the legacy
+fallback's bookkeeping flaw. It does not establish the actual allocated size
+and does not prove that the modem had no memory or that low GNSS C/N0 was
+caused by memshare.
+
+During a 60-second GNSS session, narrowly enabled dynamic-debug logging showed
+no new memshare requests. Logging flags were restored afterwards. A memory
+allocation per application GPS start therefore was not observed in that run.
+The session produced 833 NMEA sentences and no fix. The real memory transfer
+at modem boot was not captured: reboots and modem restarts were prohibited.
+
+Validation
+----------
+ tools/testing/selftests/memshare/legacy_test.py extracts the real C function
+ bodies and uses the real request/response structs, with host DMA/QMI/DT mocks.
+ ASan/UBSan checks cover reuse, pool exhaustion, response lifetime, transport
+ failure, bad/zero sizes, page-alignment overflow, reservation failure, extra
+ children, stale handles, dynamic SSR cleanup, and guaranteed retention.
+ The pre-change source was also exercised with targeted cases: response leak,
+ full-table lock retention and failed-reservation publication each reproduce.
+ It does not emulate DMA/XPU hardware, QMI transport or actual concurrent SSR.
+ The eight compiled QMI descriptors and service tuple match the stock ELF.
+ ARM driver compilation and full zImage-dtb build succeed.
+ No new kernel was flashed; these source-level changes have not been tested
+ against modem boot or measured for GNSS reception improvement.
+
+Stock GPL source follow-up
+--------------------------
+The clean import 7be17db723f426b4181a7c91bce353a4a536f282 from the supplied
+DEPRECATED_stock_android_kernel_samsung_msm8916_A3 repository is now available.
+Its memshare C source corroborates the binary findings above. See
+a3-stock-shared-memory-audit.txt for source/DT comparisons and commit provenance.

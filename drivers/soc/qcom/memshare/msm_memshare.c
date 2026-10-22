@@ -156,17 +156,20 @@ void free_mem_clients(int proc)
 
 	pr_debug("memshare: freeing clients\n");
 
+	mutex_lock(&memsh_drv->mem_share);
 	for (i = 0; i < MAX_CLIENTS; i++) {
 		if (memblock[i].peripheral == proc &&
 				!memblock[i].guarantee) {
 			pr_debug("Freeing memory for client id: %d\n",
 					memblock[i].client_id);
-			dma_free_attrs(memsh_drv->dev, memblock[i].size,
-				memblock[i].virtual_addr, memblock[i].phy_addr,
-				&attrs);
+			if (memblock[i].alloted)
+				dma_free_attrs(memsh_drv->dev, memblock[i].size,
+					memblock[i].virtual_addr,
+					memblock[i].phy_addr, &attrs);
 			free_client(i);
 		}
 	}
+	mutex_unlock(&memsh_drv->mem_share);
 }
 
 void fill_alloc_response(struct mem_alloc_generic_resp_msg_v01 *resp,
@@ -174,17 +177,17 @@ void fill_alloc_response(struct mem_alloc_generic_resp_msg_v01 *resp,
 {
 	resp->sequence_id_valid = 1;
 	resp->sequence_id = memblock[id].sequence_id;
+	if (*flag) {
+		resp->resp.result = QMI_RESULT_FAILURE_V01;
+		resp->resp.error = QMI_ERR_NO_MEMORY_V01;
+		return;
+	}
 	resp->dhms_mem_alloc_addr_info_valid = 1;
 	resp->dhms_mem_alloc_addr_info_len = 1;
 	resp->dhms_mem_alloc_addr_info[0].phy_addr = memblock[id].phy_addr;
 	resp->dhms_mem_alloc_addr_info[0].num_bytes = memblock[id].size;
-	if (!*flag) {
-		resp->resp.result = QMI_RESULT_SUCCESS_V01;
-		resp->resp.error = QMI_ERR_NONE_V01;
-	} else {
-		resp->resp.result = QMI_RESULT_FAILURE_V01;
-		resp->resp.error = QMI_ERR_NO_MEMORY_V01;
-	}
+	resp->resp.result = QMI_RESULT_SUCCESS_V01;
+	resp->resp.error = QMI_ERR_NONE_V01;
 
 }
 
@@ -243,6 +246,11 @@ static int handle_alloc_req(void *req_h, void *req)
 	alloc_resp.resp = QMI_RESULT_FAILURE_V01;
 	if (!alloc_req->num_bytes)
 		goto unlock;
+	/* The legacy protocol has no client ID: it always refers to modem GPS. */
+	if (memblock[GPS].client_id != DHMS_MEM_CLIENT_INVALID &&
+	    (memblock[GPS].client_id != DHMS_MEM_CLIENT_GPS_V01 ||
+	     memblock[GPS].peripheral != DHMS_MEM_PROC_MPSS_V01))
+		goto unlock;
 
 	if (!memblock[GPS].size) {
 		rc = memshare_alloc(memsh_drv->dev, alloc_req->num_bytes,
@@ -251,6 +259,8 @@ static int handle_alloc_req(void *req_h, void *req)
 			goto unlock;
 		memblock[GPS].size = alloc_req->num_bytes;
 		memblock[GPS].alloted = 1;
+		memblock[GPS].client_id = DHMS_MEM_CLIENT_GPS_V01;
+		memblock[GPS].peripheral = DHMS_MEM_PROC_MPSS_V01;
 	}
 	alloc_resp.num_bytes_valid = 1;
 	/* The legacy IDL permits returning less than the requested size. */
@@ -297,16 +307,27 @@ static int handle_alloc_generic_req(void *req_h, void *req)
 	}
 	alloc_resp->resp.result = QMI_RESULT_FAILURE_V01;
 	alloc_resp->resp.error = QMI_ERR_NO_MEMORY_V01;
+	alloc_resp->sequence_id_valid = 1;
+	alloc_resp->sequence_id = alloc_req->sequence_id;
+	if (!alloc_req->num_bytes)
+		goto send_response;
+	if (alloc_req->client_id == DHMS_MEM_CLIENT_INVALID ||
+	    alloc_req->proc_id < DHMS_MEM_PROC_MPSS_V01 ||
+	    alloc_req->proc_id > DHMS_MEM_PROC_WCNSS_V01) {
+		alloc_resp->resp.error = QMI_ERR_INVALID_ID_V01;
+		goto send_response;
+	}
 	pr_debug("alloc request client id: %d proc _id: %d\n",
 			alloc_req->client_id, alloc_req->proc_id);
 	client_id = check_client(alloc_req->client_id, alloc_req->proc_id,
 								CHECK);
 
-	if (client_id >= MAX_CLIENTS) {
+	if (client_id < 0 || client_id >= MAX_CLIENTS) {
 		pr_err("memshare: %s client not found, requested client: %d, proc_id: %d\n",
 			__func__, alloc_req->client_id,
 			alloc_req->proc_id);
-		return -EINVAL;
+		alloc_resp->resp.error = QMI_ERR_INVALID_ID_V01;
+		goto send_response;
 	}
 
 	if (!memblock[client_id].alloted) {
@@ -327,6 +348,7 @@ static int handle_alloc_generic_req(void *req_h, void *req)
 
 	fill_alloc_response(alloc_resp, client_id, &resp);
 
+send_response:
 	mutex_unlock(&memsh_drv->mem_share);
 	pr_debug("alloc_resp.num_bytes :%d, alloc_resp.handle :%lx, alloc_resp.mem_req_result :%lx\n",
 			  alloc_resp->dhms_mem_alloc_addr_info[0].num_bytes,
@@ -335,12 +357,13 @@ static int handle_alloc_generic_req(void *req_h, void *req)
 			  (unsigned long int)alloc_resp->resp.result);
 	rc = qmi_send_resp_from_cb(mem_share_svc_handle, curr_conn, req_h,
 			&mem_share_svc_alloc_generic_resp_desc, alloc_resp,
-			sizeof(alloc_resp));
+			sizeof(*alloc_resp));
 
 	if (rc < 0)
 		pr_err("In %s, Error sending the alloc request: %d\n",
 							__func__, rc);
 
+	kfree(alloc_resp);
 	return rc;
 }
 
@@ -360,7 +383,9 @@ static int handle_free_req(void *req_h, void *req)
 			(unsigned long int)memblock[GPS].virtual_addr,
 			(unsigned long int)free_req->handle,
 			memblock[GPS].size);
-		if (!memblock[GPS].alloted ||
+		if (memblock[GPS].client_id != DHMS_MEM_CLIENT_GPS_V01 ||
+		    memblock[GPS].peripheral != DHMS_MEM_PROC_MPSS_V01 ||
+		    !memblock[GPS].alloted ||
 		    free_req->handle != memblock[GPS].phy_addr) {
 			free_resp.resp = QMI_RESULT_FAILURE_V01;
 			goto unlock;
@@ -407,6 +432,14 @@ static int handle_free_generic_req(void *req_h, void *req)
 		flag = 1;
 	} else if (!memblock[client_id].guarantee &&
 					memblock[client_id].alloted) {
+		if (free_req->dhms_mem_alloc_addr_info_len != 1 ||
+		    free_req->dhms_mem_alloc_addr_info[0].phy_addr !=
+					memblock[client_id].phy_addr ||
+		    free_req->dhms_mem_alloc_addr_info[0].num_bytes !=
+					memblock[client_id].size) {
+			flag = 1;
+			goto reply;
+		}
 		pr_debug("In %s: pblk->virtual_addr :%lx, pblk->phy_addr: %lx\n,size: %d",
 				__func__,
 				(unsigned long int)
@@ -423,6 +456,7 @@ static int handle_free_generic_req(void *req_h, void *req)
 						__func__);
 	}
 
+reply:
 	if (flag) {
 		free_resp.resp.result = QMI_RESULT_FAILURE_V01;
 		free_resp.resp.error = QMI_ERR_INVALID_ID_V01;
@@ -575,12 +609,10 @@ int memshare_alloc(struct device *dev,
 					struct mem_blocks *pblk)
 {
 
-	int ret;
-
 	pr_debug("%s: memshare_alloc called", __func__);
-	if (!pblk) {
+	if (!pblk || !block_size || block_size > UINT_MAX - (PAGE_SIZE - 1)) {
 		pr_err("%s: Failed to alloc\n", __func__);
-		return -ENOMEM;
+		return -EINVAL;
 	}
 
 	pblk->virtual_addr = dma_alloc_attrs(dev, block_size,
@@ -588,8 +620,8 @@ int memshare_alloc(struct device *dev,
 						&attrs);
 	if (pblk->virtual_addr == NULL) {
 		pr_err("allocation failed, %d\n", block_size);
-		ret = -ENOMEM;
-		return ret;
+		pblk->phy_addr = 0;
+		return -ENOMEM;
 	}
 	pr_debug("pblk->phy_addr :%lx, pblk->virtual_addr %lx\n",
 		  (unsigned long int)pblk->phy_addr,
@@ -630,6 +662,10 @@ static int memshare_child_probe(struct platform_device *pdev)
 	uint32_t size;
 	const char *name;
 	struct memshare_child *drv;
+	struct mem_blocks block = {0};
+
+	if (num_clients >= ARRAY_SIZE(client_table))
+		return -EINVAL;
 
 	drv = devm_kzalloc(&pdev->dev, sizeof(struct memshare_child),
 							GFP_KERNEL);
@@ -640,8 +676,6 @@ static int memshare_child_probe(struct platform_device *pdev)
 	}
 
 	drv->dev = &pdev->dev;
-	memsh_child = drv;
-	platform_set_drvdata(pdev, memsh_child);
 
 	rc = of_property_read_u32(pdev->dev.of_node, "qcom,peripheral-size",
 						&size);
@@ -660,25 +694,31 @@ static int memshare_child_probe(struct platform_device *pdev)
 	}
 
 	if (strcmp(name, "modem") == 0)
-		memblock[num_clients].peripheral = DHMS_MEM_PROC_MPSS_V01;
+		block.peripheral = DHMS_MEM_PROC_MPSS_V01;
 	else if (strcmp(name, "adsp") == 0)
-		memblock[num_clients].peripheral = DHMS_MEM_PROC_ADSP_V01;
+		block.peripheral = DHMS_MEM_PROC_ADSP_V01;
 	else if (strcmp(name, "wcnss") == 0)
-		memblock[num_clients].peripheral = DHMS_MEM_PROC_WCNSS_V01;
+		block.peripheral = DHMS_MEM_PROC_WCNSS_V01;
+	else
+		return -EINVAL;
 
-	memblock[num_clients].size = size;
-	memblock[num_clients].client_id = client_table[num_clients];
-	memblock[num_clients].guarantee = 1;
+	block.size = size;
+	block.client_id = client_table[num_clients];
+	block.guarantee = 1;
+	block.sequence_id = -1;
+	block.memory_type = MEMORY_CMA;
 
-	rc = memshare_alloc(memsh_child->dev, memblock[num_clients].size,
-					&memblock[num_clients]);
+	rc = memshare_alloc(drv->dev, size, &block);
 	if (rc) {
 		pr_err("In %s, Unable to allocate memory for guaranteed clients\n",
 						__func__);
 		return rc;
 	}
-	memblock[num_clients].alloted = 1;
+	block.alloted = 1;
+	memblock[num_clients] = block;
 	num_clients++;
+	memsh_child = drv;
+	platform_set_drvdata(pdev, drv);
 
 	return 0;
 }
