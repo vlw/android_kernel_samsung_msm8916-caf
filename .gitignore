@@ -32,6 +32,8 @@ modules.builtin
 *.lzo
 *.patch
 *.gcno
+*.py[cod]
+__pycache__/
 
 #
 # Top-level generic files
