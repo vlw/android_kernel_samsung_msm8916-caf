@@ -1,0 +1,64 @@
+A3 Binder runtime checks (2026-10-22)
+===================================
+
+Running handset: SM-A300F, kernel 3.10.108-g78dc491dd5b5-dirty, boot ID
+976cc169-6c9f-4108-b171-3d2e1ed54cba. The following device results were
+measured BEFORE the Binder changes documented here; no further reboot or
+kernel installation was performed during this check.
+
+AOSP binderThroughputTest:
+ - 2 workers x 2000 synchronous calls, empty payload:
+   average 0.0942175 ms, worst 6.5526 ms, no transaction failures.
+ - 4 workers x 4000 synchronous calls, 4096-byte payload:
+   average 0.266011 ms, worst 8.39099 ms, no transaction failures.
+
+The initial failed_transaction_log was empty. system_server, com.android.phone
+and com.android.dialer each had zero pending transactions, available pool
+threads and full free async space in the sampled state. These observations
+exclude neither intermittent congestion nor an application-specific deadlock.
+
+Targeted unmodified AOSP binderLibTest results:
+ - NopTransaction and NopTransactionOneway passed 10 repetitions each.
+ - OnewayQueueing failed 10/10 repetitions: callback 2 returned UNKNOWN_ERROR,
+   exposing unexpected reentrant delivery of the pending oneway transaction.
+ - DeathNotificationThread failed 2/2 repetitions, each taking about 5.1 s:
+   callback wait timed out because the waiting thread's queue held its event.
+
+Focused backports adapt these upstream Android fixes to our global-lock
+3.10 driver rather than importing unrelated locking changes:
+
+ - kernel/common 6f227409a179, "don't queue async transactions to thread":
+   move the next queued async transaction to proc->todo and wake proc->wait.
+ - kernel/common c825eca5ec45, "don't enqueue death notifications to thread
+   todo": an already-dead reference's initial death notification belongs on
+   proc->todo, so another available pool thread can deliver it.
+ - kernel/common 4d666b500c2d, "call poll_wait() unconditionally": register
+   the relevant waitqueue before reporting initial readiness. epoll may not
+   provide another registration callback on later poll invocations.
+
+Primary sources:
+ https://android.googlesource.com/kernel/common/+/6f227409a179
+ https://android.googlesource.com/kernel/common/+/c825eca5ec45
+ https://android.googlesource.com/kernel/common/+/4d666b500c2d
+ AOSP test introduction:
+ https://android.googlesource.com/platform/frameworks/native/+/45b07b49ba37ef4843087a2e6c35c8776d1a3c25
+
+Host tests extract the actual changed production blocks/functions and check
+queue selection, FIFO, wakeups and initial poll registration with ASan/UBSan:
+ python3 tools/testing/selftests/binder/async_queue_test.py
+ python3 tools/testing/selftests/binder/poll_death_test.py
+The original driver fails these host regressions; the modified source passes.
+They do not replace an on-device run after installation.
+
+Required post-install device regression:
+ binderLibTest --gtest_filter=BinderLibTest.NopTransaction:BinderLibTest.NopTransactionOneway:BinderLibTest.OnewayQueueing:BinderLibTest.DeathNotificationThread --gtest_repeat=10
+Then repeat a controlled incoming call with synchronized radio/Telecom/Dialer
+logs to determine whether the call UI delay was affected. The reproduced
+Binder bugs alone do not prove that they caused the previously observed
+1.9/4.7-second incoming-call display delays.
+
+Unsupported ioctl 0x40046210 is BINDER_ENABLE_ONEWAY_SPAM_DETECTION. Android
+attempts this optional feature at process startup and tolerates its absence.
+Its -EINVAL log is not a failed BC_TRANSACTION and is not silently implemented
+as a successful no-op by these changes. binderfs is likewise absent; existing
+/dev/binder, /dev/hwbinder and /dev/vndbinder devices are being used.
