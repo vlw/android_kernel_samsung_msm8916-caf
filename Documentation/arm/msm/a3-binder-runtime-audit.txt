@@ -97,3 +97,30 @@ unsupported caller policy and one-way fallback. The kernel/boot image builds.
 These are scheduler-shim checks, not on-device acceptance of the new driver.
 The phone still runs the previous kernel; the two AOSP RT tests and the full
 suite must be rerun after a separately authorized installation/reboot.
+
+
+Post-install RT acceptance (2026-10-22)
+-------------------------------------
+After one separately authorized reboot the handset runs
+3.10.108-g795c531c7d61. Boot image readback matched SHA256
+74f284b266040931de5ae224534d6a4b1338ef91e2055be268168f2539fbfdca.
+The full AOSP binderLibTest suite now passes 41 cases, skips 3 and fails 0.
+SchedPolicySet and InheritRt pass 20 fresh-process paired runs (40 checks).
+
+Do not repeat that pair in a single process with --gtest_repeat: InheritRt
+sets the caller to SCHED_RR/8 and never restores it. Later SchedPolicySet
+iterations legitimately inherit 8 instead of the test's expected 7. The
+first iteration passes; independent fresh processes all pass. The platform
+test was not modified and the kernel's inheritance was not weakened.
+
+Post-install SO_COOKIE/maps/verifier, netd tagging/destruction and actual
+IPv4/IPv6 counters, CPU BPF versus wait4, netlink ACK, cgroup v2 lifecycle,
+TCP_INFO and bounded VM/ext4/futex/epoll/seccomp checks all pass. Venus init
+selects the F partition image (00130); AVC Surface returns all 60 frames.
+CM36652 registration/event delivery works with sensor_efs_file and no new
+prox_cal denial. Boot ID stays fixed throughout validation; tainted=0,
+/data stays writable, zram error counters are zero, no panic/Oops, ADMA or
+ext4 journal errors were observed. No real incoming call was exercised.
+
+Runtime logs and full previous boot backup:
+out/kernel-runtime-diagnostics/2026-10-22/three-fixes/after-rt-flash/
