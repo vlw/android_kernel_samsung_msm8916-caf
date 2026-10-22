@@ -692,7 +692,6 @@ static int memshare_probe(struct platform_device *pdev)
 	mutex_init(&drv->mem_share);
 
 	INIT_WORK(&drv->memshare_init_work, memshare_init_worker);
-	schedule_work(&drv->memshare_init_work);
 
 	drv->dev = &pdev->dev;
 	memsh_drv = drv;
@@ -708,6 +707,8 @@ static int memshare_probe(struct platform_device *pdev)
 	}
 
 	subsys_notif_register_notifier("modem", &nb);
+	/* Publish QMI only after the guaranteed client buffers exist. */
+	schedule_work(&drv->memshare_init_work);
 	pr_info("In %s, Memshare probe success\n", __func__);
 	return 0;
 }
@@ -742,6 +743,9 @@ static struct of_device_id memshare_match_table[] = {
 
 static struct of_device_id memshare_match_table1[] = {
 	{
+		.compatible = "memshare,peripheral",
+	},
+	{
 		.compatible = "qcom,memshare-peripheral",
 	},
 	{}
@@ -768,8 +772,28 @@ static struct platform_driver memshare_pchild = {
 	},
 };
 
-module_platform_driver(memshare_pdriver);
-module_platform_driver(memshare_pchild);
+static int __init memshare_init(void)
+{
+	int rc;
+
+	/* Parent probing populates children before advertising the QMI service. */
+	rc = platform_driver_register(&memshare_pchild);
+	if (rc)
+		return rc;
+
+	rc = platform_driver_register(&memshare_pdriver);
+	if (rc)
+		platform_driver_unregister(&memshare_pchild);
+	return rc;
+}
+module_init(memshare_init);
+
+static void __exit memshare_exit(void)
+{
+	platform_driver_unregister(&memshare_pdriver);
+	platform_driver_unregister(&memshare_pchild);
+}
+module_exit(memshare_exit);
 
 MODULE_DESCRIPTION("Mem Share QMI Service Driver");
 MODULE_LICENSE("GPL v2");
