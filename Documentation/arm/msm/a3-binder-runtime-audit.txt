@@ -62,3 +62,38 @@ attempts this optional feature at process startup and tolerates its absence.
 Its -EINVAL log is not a failed BC_TRANSACTION and is not silently implemented
 as a successful no-op by these changes. binderfs is likewise absent; existing
 /dev/binder, /dev/hwbinder and /dev/vndbinder devices are being used.
+
+
+RT scheduling follow-up (2026-10-22)
+----------------------------------
+The complete 44-case AOSP suite on the previously installed kernel produced
+39 passes, 3 harness skips and 2 failures: SchedPolicySet and InheritRt.
+Both failures returned SCHED_NORMAL/0 instead of SCHED_RR/7 or SCHED_RR/8.
+The old driver implemented nice-only inheritance and ignored the newer
+flat_binder_object scheduling policy and inherit-RT bits.
+
+Ported Android common e00eb41c0c7bea879d93e878748408e73357b384 (Martijn Coenen),
+including its folded node-policy, opt-in RT, permission/restore and tracing
+changes, to the globally locked staging driver. Both kernel UAPI copies must
+advertise the same bits. Node priority is initialized in binder_new_node,
+including legacy context-manager creation with fp == NULL. The receiver's
+CAP_SYS_NICE/RLIMIT_RTPRIO/RLIMIT_NICE bound increases; restoring a saved
+priority does not re-apply those limits. Async requests use the destination's
+default policy rather than inheriting the caller. Task references cover early
+priority setting of explicitly targeted nested-call threads.
+
+3.10 adaptation: use sched/rt.h constants for priority conversion, retain the
+global mutex instead of upstream fine-grained locks, restore before freeing
+successful replies and on failed replies, and initialize trace arguments in
+old/new/desired order. When RT inheritance is disabled, compare the node's
+minimum against the effective fallback priority; this retains an explicit
+fair node floor for RT callers too.
+
+Host validation: tools/testing/selftests/binder/priority_test.py extracts
+production helper bodies and the production transaction priority capture
+block. ASan/UBSan tests cover conversion ranges, node RT policy, opt-in RT,
+FIFO tie, receiver limits, nested restoration, repeated priority application,
+unsupported caller policy and one-way fallback. The kernel/boot image builds.
+These are scheduler-shim checks, not on-device acceptance of the new driver.
+The phone still runs the previous kernel; the two AOSP RT tests and the full
+suite must be rerun after a separately authorized installation/reboot.
