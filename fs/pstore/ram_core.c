@@ -270,20 +270,20 @@ static void notrace persistent_ram_update(struct persistent_ram_zone *prz,
 void persistent_ram_save_old(struct persistent_ram_zone *prz)
 {
 	struct persistent_ram_buffer *buffer = prz->buffer;
+	char *old_log;
 	size_t size = buffer_size(prz);
 	size_t start = buffer_start(prz);
 
 	if (!size)
 		return;
 
-	if (!prz->old_log) {
-		persistent_ram_ecc_old(prz);
-		prz->old_log = kmalloc(size, GFP_KERNEL);
-	}
-	if (!prz->old_log) {
+	persistent_ram_ecc_old(prz);
+	old_log = krealloc(prz->old_log, size, GFP_KERNEL);
+	if (!old_log) {
 		pr_err("persistent_ram: failed to allocate buffer\n");
 		return;
 	}
+	prz->old_log = old_log;
 
 	prz->old_log_size = size;
 	memcpy_fromio(prz->old_log, &buffer->data[start], size - start);
@@ -394,6 +394,8 @@ static void *persistent_ram_iomap(phys_addr_t start, size_t size,
 		va = ioremap(start, size);
 	else
 		va = ioremap_wc(start, size);
+	if (!va)
+		release_mem_region(start, size);
 
 	return va;
 }
@@ -471,6 +473,8 @@ void persistent_ram_free(struct persistent_ram_zone *prz)
 		prz->vaddr = NULL;
 	}
 	persistent_ram_free_old(prz);
+	if (prz->rs_decoder)
+		free_rs(prz->rs_decoder);
 	kfree(prz);
 }
 
