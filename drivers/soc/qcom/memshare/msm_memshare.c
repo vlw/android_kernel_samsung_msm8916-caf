@@ -43,7 +43,6 @@ static struct workqueue_struct *mem_share_svc_workqueue;
 struct memshare_driver {
 	struct device *dev;
 	struct mutex mem_share;
-	struct mutex mem_free;
 	struct work_struct memshare_init_work;
 };
 
@@ -234,31 +233,33 @@ static struct notifier_block nb = {
 static int handle_alloc_req(void *req_h, void *req)
 {
 	struct mem_alloc_req_msg_v01 *alloc_req;
-	struct mem_alloc_resp_msg_v01 alloc_resp;
+	struct mem_alloc_resp_msg_v01 alloc_resp = {0};
 	int rc = 0;
 
 	alloc_req = (struct mem_alloc_req_msg_v01 *)req;
 	pr_debug("%s: Received Alloc Request\n", __func__);
 	pr_debug("%s: req->num_bytes = %d\n", __func__, alloc_req->num_bytes);
 	mutex_lock(&memsh_drv->mem_share);
+	alloc_resp.resp = QMI_RESULT_FAILURE_V01;
+	if (!alloc_req->num_bytes)
+		goto unlock;
+
 	if (!memblock[GPS].size) {
-		memset(&alloc_resp, 0, sizeof(struct mem_alloc_resp_msg_v01));
-		alloc_resp.resp = QMI_RESULT_FAILURE_V01;
 		rc = memshare_alloc(memsh_drv->dev, alloc_req->num_bytes,
 					&memblock[GPS]);
+		if (rc)
+			goto unlock;
+		memblock[GPS].size = alloc_req->num_bytes;
+		memblock[GPS].alloted = 1;
 	}
 	alloc_resp.num_bytes_valid = 1;
-	alloc_resp.num_bytes =  alloc_req->num_bytes;
+	/* The legacy IDL permits returning less than the requested size. */
+	alloc_resp.num_bytes = min(alloc_req->num_bytes, memblock[GPS].size);
 	alloc_resp.handle_valid = 1;
 	alloc_resp.handle = memblock[GPS].phy_addr;
-	/* Binding last client to support request coming on old idl*/
-	if (rc) {
-		alloc_resp.resp = QMI_RESULT_FAILURE_V01;
-		memblock[GPS].size = 0;
-	} else {
-		alloc_resp.resp = QMI_RESULT_SUCCESS_V01;
-	}
+	alloc_resp.resp = QMI_RESULT_SUCCESS_V01;
 
+unlock:
 	mutex_unlock(&memsh_drv->mem_share);
 
 	pr_debug("alloc_resp.num_bytes :%d, alloc_resp.handle :%lx, alloc_resp.mem_req_result :%lx\n",
@@ -346,10 +347,10 @@ static int handle_alloc_generic_req(void *req_h, void *req)
 static int handle_free_req(void *req_h, void *req)
 {
 	struct mem_free_req_msg_v01 *free_req;
-	struct mem_free_resp_msg_v01 free_resp;
+	struct mem_free_resp_msg_v01 free_resp = {0};
 	int rc;
 
-	mutex_lock(&memsh_drv->mem_free);
+	mutex_lock(&memsh_drv->mem_share);
 	if (!memblock[GPS].guarantee) {
 		free_req = (struct mem_free_req_msg_v01 *)req;
 		pr_debug("%s: Received Free Request\n", __func__);
@@ -359,12 +360,20 @@ static int handle_free_req(void *req_h, void *req)
 			(unsigned long int)memblock[GPS].virtual_addr,
 			(unsigned long int)free_req->handle,
 			memblock[GPS].size);
-		dma_free_coherent(memsh_drv->dev, memblock[GPS].size,
+		if (!memblock[GPS].alloted ||
+		    free_req->handle != memblock[GPS].phy_addr) {
+			free_resp.resp = QMI_RESULT_FAILURE_V01;
+			goto unlock;
+		}
+		/* Match the allocation's DMA_ATTR_NO_KERNEL_MAPPING cookie. */
+		dma_free_attrs(memsh_drv->dev, memblock[GPS].size,
 			memblock[GPS].virtual_addr,
-				free_req->handle);
+			memblock[GPS].phy_addr, &attrs);
+		free_client(GPS);
 	}
 	free_resp.resp = QMI_RESULT_SUCCESS_V01;
-	mutex_unlock(&memsh_drv->mem_free);
+unlock:
+	mutex_unlock(&memsh_drv->mem_share);
 	rc = qmi_send_resp_from_cb(mem_share_svc_handle, curr_conn, req_h,
 			&mem_share_svc_free_resp_desc, &free_resp,
 			sizeof(free_resp));
@@ -385,7 +394,7 @@ static int handle_free_generic_req(void *req_h, void *req)
 
 	free_req = (struct mem_free_generic_req_msg_v01 *)req;
 	pr_debug("%s: Received Free Request\n", __func__);
-	mutex_lock(&memsh_drv->mem_free);
+	mutex_lock(&memsh_drv->mem_share);
 	memset(&free_resp, 0, sizeof(struct mem_free_generic_resp_msg_v01));
 	free_resp.resp.error = QMI_ERR_INTERNAL_V01;
 	free_resp.resp.result = QMI_RESULT_FAILURE_V01;
@@ -422,7 +431,7 @@ static int handle_free_generic_req(void *req_h, void *req)
 		free_resp.resp.error = QMI_ERR_NONE_V01;
 	}
 
-	mutex_unlock(&memsh_drv->mem_free);
+	mutex_unlock(&memsh_drv->mem_share);
 	rc = qmi_send_resp_from_cb(mem_share_svc_handle, curr_conn, req_h,
 		&mem_share_svc_free_generic_resp_desc, &free_resp,
 		sizeof(free_resp));
@@ -688,7 +697,6 @@ static int memshare_probe(struct platform_device *pdev)
 	}
 
 	/* Memory allocation has been done successfully */
-	mutex_init(&drv->mem_free);
 	mutex_init(&drv->mem_share);
 
 	INIT_WORK(&drv->memshare_init_work, memshare_init_worker);
