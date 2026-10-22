@@ -569,10 +569,12 @@ struct bt541_ts_info {
 #endif
 #ifdef CONFIG_FB
 	struct notifier_block fb_notif;
+	struct work_struct resume_work;
 #endif
 	struct regulator *vddo_vreg;
 	struct regulator *vdd_en;
 	bool device_enabled;
+	struct mutex pm_lock;
 	bool checkUMSmode;
 };
 /* Dummy touchkey code */
@@ -740,6 +742,7 @@ static void esd_timeout_handler(unsigned long data);
 #endif
 
 #ifdef CONFIG_FB
+static void bt541_resume_work(struct work_struct *work);
 static int fb_notifier_callback(struct notifier_block *self,
 	unsigned long event, void *data);
 #endif
@@ -1984,11 +1987,6 @@ retry_init:
 	dev_info(&client->dev, "Esd timer register = %d\n", reg_val);
 #endif
 #endif
-#ifdef CONFIG_FB
-	info->fb_notif.notifier_call = fb_notifier_callback;
-	if (fb_register_client(&info->fb_notif))
-		pr_err("%s: could not create fb notifier\n", __func__);
-#endif
 	zinitix_debug_msg("successfully initialized\r\n");
 	return true;
 
@@ -2822,10 +2820,14 @@ static int bt541_ts_suspend(struct device *dev)
 static int bt541_input_open(struct input_dev *dev)
 {
 	struct bt541_ts_info *info;
+	int ret;
 
 	pr_info("[TSP] %s\n", __func__);
 	info = input_get_drvdata(dev);
-	return bt541_ts_resume(&info->client->dev);
+	mutex_lock(&info->pm_lock);
+	ret = bt541_ts_resume(&info->client->dev);
+	mutex_unlock(&info->pm_lock);
+	return ret;
 }
 static void bt541_input_close(struct input_dev *dev)
 {
@@ -2833,7 +2835,12 @@ static void bt541_input_close(struct input_dev *dev)
 
 	pr_info("[TSP] %s\n", __func__);
 	info = input_get_drvdata(dev);
+#ifdef CONFIG_FB
+	cancel_work_sync(&info->resume_work);
+#endif
+	mutex_lock(&info->pm_lock);
 	bt541_ts_suspend(&info->client->dev);
+	mutex_unlock(&info->pm_lock);
 }
 static bool ts_set_touchmode(u16 value)
 {
@@ -4751,6 +4758,11 @@ static int bt541_ts_probe(struct i2c_client *client,
 	info->client = client;
 	info->pdata = pdata;
 	info->device_enabled = 1;
+	mutex_init(&info->pm_lock);
+#ifdef CONFIG_FB
+	INIT_WORK(&info->resume_work, bt541_resume_work);
+#endif
+	sema_init(&info->work_lock, 1);
 
 
 /* Get pinctrl if target uses pinctrl */
@@ -4903,7 +4915,6 @@ static int bt541_ts_probe(struct i2c_client *client,
 	}
 
 	info->work_state = NOTHING;
-	sema_init(&info->work_lock, 1);
 
 #if ESD_TIMER_INTERVAL
 	spin_lock_init(&info->lock);
@@ -4978,6 +4989,12 @@ static int bt541_ts_probe(struct i2c_client *client,
 #if defined(CONFIG_TOUCH_DISABLER)
 	touch_disabler_set_ts_dev(info->input_dev);
 #endif
+
+#ifdef CONFIG_FB
+	info->fb_notif.notifier_call = fb_notifier_callback;
+	if (fb_register_client(&info->fb_notif))
+		pr_err("%s: could not create fb notifier\n", __func__);
+#endif
 	return 0;
 
 #ifdef SEC_FACTORY_TEST
@@ -5014,6 +5031,13 @@ static int bt541_ts_remove(struct i2c_client *client)
 {
 	struct bt541_ts_info *info = i2c_get_clientdata(client);
 	struct bt541_ts_platform_data *pdata = info->pdata;
+
+#ifdef CONFIG_FB
+	fb_unregister_client(&info->fb_notif);
+	cancel_work_sync(&info->resume_work);
+#endif
+	/* close() needs live IRQs and must run before work_lock is held. */
+	input_unregister_device(info->input_dev);
 #if defined(CONFIG_TOUCH_DISABLER)
 	touch_disabler_set_ts_dev(NULL);
 #endif
@@ -5039,9 +5063,6 @@ static int bt541_ts_remove(struct i2c_client *client)
 	destroy_workqueue(esd_tmr_workqueue);
 #endif
 
-#ifdef CONFIG_FB
-	fb_unregister_client(&info->fb_notif);
-#endif
 
 	if (info->irq)
 		free_irq(info->irq, info);
@@ -5059,8 +5080,6 @@ static int bt541_ts_remove(struct i2c_client *client)
 		if (gpio_is_valid(pdata->tsp_en_gpio) != 0)
 			gpio_free(pdata->tsp_en_gpio);
 
-	input_unregister_device(info->input_dev);
-	input_free_device(info->input_dev);
 	up(&info->work_lock);
 	kfree(info);
 
@@ -5070,6 +5089,11 @@ static int bt541_ts_remove(struct i2c_client *client)
 void bt541_ts_shutdown(struct i2c_client *client)
 {
 	struct bt541_ts_info *info = i2c_get_clientdata(client);
+
+#ifdef CONFIG_FB
+	fb_unregister_client(&info->fb_notif);
+	cancel_work_sync(&info->resume_work);
+#endif
 
 	dev_info(&client->dev, "%s++\n", __func__);
 	disable_irq(info->irq);
@@ -5084,6 +5108,15 @@ void bt541_ts_shutdown(struct i2c_client *client)
 }
 
 #ifdef CONFIG_FB
+/* Controller reset delays must not block the display's unblank notifier. */
+static void bt541_resume_work(struct work_struct *work)
+{
+	struct bt541_ts_info *info = container_of(work, struct bt541_ts_info,
+						 resume_work);
+
+	bt541_input_open(info->input_dev);
+}
+
 static int fb_notifier_callback(struct notifier_block *self,
 				unsigned long event, void *data)
 {
@@ -5097,7 +5130,7 @@ static int fb_notifier_callback(struct notifier_block *self,
 		case FB_BLANK_NORMAL:
 		case FB_BLANK_VSYNC_SUSPEND:
 		case FB_BLANK_HSYNC_SUSPEND:
-			bt541_input_open(tc_data->input_dev);
+			schedule_work(&tc_data->resume_work);
 			break;
 		case FB_BLANK_POWERDOWN:
 			bt541_input_close(tc_data->input_dev);

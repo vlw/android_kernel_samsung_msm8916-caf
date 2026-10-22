@@ -144,6 +144,7 @@ struct abov_tk_info {
 	struct input_dev *input_dev;
 	struct abov_touchkey_platform_data *pdata;
 	struct mutex lock;
+	struct mutex pm_lock;
 	struct pinctrl *pinctrl;
 
 	const struct firmware *firm_data_bin;
@@ -175,6 +176,7 @@ struct abov_tk_info {
 	bool dual_mode;
 #ifdef CONFIG_FB
 	struct notifier_block fb_notif;
+	struct work_struct resume_work;
 #endif
 	atomic_t	keypad_enable;
 };
@@ -186,6 +188,7 @@ static int abov_tk_i2c_read_checksum(struct abov_tk_info *info);
 static void abov_tk_dual_detection_mode(struct abov_tk_info *info, int mode);
 
 #ifdef CONFIG_FB
+static void abov_tk_resume_work(struct work_struct *work);
 static int fb_notifier_callback(struct notifier_block *self,
 	unsigned long event, void *data);
 #endif
@@ -1514,6 +1517,10 @@ static int abov_tk_probe(struct i2c_client *client,
 
 	info->irq = -1;
 	mutex_init(&info->lock);
+	mutex_init(&info->pm_lock);
+#ifdef CONFIG_FB
+	INIT_WORK(&info->resume_work, abov_tk_resume_work);
+#endif
 
 	abov_tk_reset_for_bootmode(info);
 	msleep(ABOV_RESET_DELAY);
@@ -1661,18 +1668,19 @@ static int abov_tk_remove(struct i2c_client *client)
 {
 	struct abov_tk_info *info = i2c_get_clientdata(client);
 
-	if (info->enabled)
-		info->pdata->power(info->pdata, false);
-
 #ifdef CONFIG_FB
 	fb_unregister_client(&info->fb_notif);
+	cancel_work_sync(&info->resume_work);
 #endif
+	/* close() must finish while the IRQ and controller are still live. */
+	input_unregister_device(info->input_dev);
+
+	if (info->enabled)
+		info->pdata->power(info->pdata, false);
 
 	info->enabled = false;
 	if (info->irq >= 0)
 		free_irq(info->irq, info);
-	input_unregister_device(info->input_dev);
-	input_free_device(info->input_dev);
 	kfree(info);
 
 	return 0;
@@ -1682,6 +1690,11 @@ static void abov_tk_shutdown(struct i2c_client *client)
 {
 	struct abov_tk_info *info = i2c_get_clientdata(client);
 	u8 cmd = CMD_LED_OFF;
+
+#ifdef CONFIG_FB
+	fb_unregister_client(&info->fb_notif);
+	cancel_work_sync(&info->resume_work);
+#endif
 
 	info->enabled = false;
 
@@ -1765,6 +1778,15 @@ static int abov_tk_resume(struct device *dev)
 }
 
 #ifdef CONFIG_FB
+/* Controller reset delays must not block the display's unblank notifier. */
+static void abov_tk_resume_work(struct work_struct *work)
+{
+	struct abov_tk_info *info = container_of(work, struct abov_tk_info,
+						 resume_work);
+
+	abov_tk_input_open(info->input_dev);
+}
+
 static int fb_notifier_callback(struct notifier_block *self,
 				unsigned long event, void *data)
 {
@@ -1778,7 +1800,7 @@ static int fb_notifier_callback(struct notifier_block *self,
 		case FB_BLANK_NORMAL:
 		case FB_BLANK_VSYNC_SUSPEND:
 		case FB_BLANK_HSYNC_SUSPEND:
-			abov_tk_input_open(tc_info->input_dev);
+			schedule_work(&tc_info->resume_work);
 			break;
 		case FB_BLANK_POWERDOWN:
 			abov_tk_input_close(tc_info->input_dev);
@@ -1796,17 +1818,23 @@ static int fb_notifier_callback(struct notifier_block *self,
 static int abov_tk_input_open(struct input_dev *dev)
 {
 	struct abov_tk_info *info = input_get_drvdata(dev);
+	mutex_lock(&info->pm_lock);
 
 	gpio_direction_input(info->pdata->gpio_scl);
 	gpio_direction_input(info->pdata->gpio_sda);
 
 	abov_tk_resume(&info->client->dev);
 
+	mutex_unlock(&info->pm_lock);
 	return 0;
 }
 static void abov_tk_input_close(struct input_dev *dev)
 {
 	struct abov_tk_info *info = input_get_drvdata(dev);
+#ifdef CONFIG_FB
+	cancel_work_sync(&info->resume_work);
+#endif
+	mutex_lock(&info->pm_lock);
 
 #ifdef LED_TWINKLE_BOOTING
 	info->led_twinkle_check = 0;
@@ -1814,6 +1842,7 @@ static void abov_tk_input_close(struct input_dev *dev)
 	abov_tk_suspend(&info->client->dev);
 	gpio_set_value(info->pdata->gpio_scl, 1);
 	gpio_set_value(info->pdata->gpio_sda, 1);
+	mutex_unlock(&info->pm_lock);
 }
 
 static const struct i2c_device_id abov_tk_id[] = {
