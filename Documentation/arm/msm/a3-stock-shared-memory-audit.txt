@@ -295,3 +295,42 @@ including console, panic/oops, Android pmsg and ECC. Thus the earlier removal
 and 6-MiB recovery estimate above are superseded: the expected fixed-reserve
 reduction relative to the initial tree is now 5 MiB (external_image_mem only).
 See a3-pstore.txt for layout, driver fixes, tests and runtime limitations.
+
+Runtime correction: keep the bootloader-protected external image range
+--------------------------------------------------------------------
+The 14-MiB override was first booted on SM-A300F/A300FXXS1BRH1 after the
+2026-10-22 full OTA. Boot failed: at 23.127 s MMC ADMA transfers involving
+physical 0x85800000 and following pages returned -EIO; subsequent accesses
+also generated imprecise external aborts. At 24.022 s ext4 aborted the userdata
+journal and remounted mmcblk0p27 read-only. Zygote then repeatedly aborted with
+"Error changing dalvik-cache ownership : Read-only file system". /proc/iomem
+confirmed that 0x80000000..0x859fffff was exposed as System RAM.
+
+0x85800000 lies inside the 0x85500000..0x859fffff range released by our
+19-to-14-MiB reduction. These observations indicate that the stock-source
+layout does not match this handset's active secure-firmware protection.
+The imported kernel's DTS alone cannot prove those pages safe for Linux.
+Restore the common 19-MiB external_image_mem reservation for all A3/A3U leaves.
+Keep the separate 50-MiB multimedia CMA request, memshare fixes and functional
+pstore reservation/backend. The earlier expected 5-MiB permanent-RAM gain is
+withdrawn. This is a conservative reservation correction; post-installation
+validation is still required to confirm elimination of the DMA failures.
+
+Memshare runtime validation after installation (2026-10-22)
+---------------------------------------------------------
+On the repaired running SM-A300F kernel, both memshare and memshare_child
+bind successfully: qcom,memshare.61 and qcom,client_1.140 appear under their
+platform driver directories. The child probe returns successfully only after
+allocating the DT-requested guaranteed buffer (2097152 bytes, GPS client 0,
+MPSS peripheral). The parent's QMI initialization runs after child creation.
+IPC Router publishes service 0x34, instance 0x101, local node 1/port 1.
+There is no /dev/memshare character interface in this implementation.
+
+The local service port had zero transmitted/received packets before and after
+an ordinary 35-second GNSS request. GNSS started and delivered satellite/NMEA
+callbacks, but the modem did not use this heap service during the observation.
+This confirms repaired binding/allocation/publication, not modem consumption
+of the buffer or a measured GNSS reception improvement. No artificial QMI
+allocation/free requests, modem restarts or kernel probe modules were used.
+"Modem Restart has happened" at initial boot is printed by SUBSYS_AFTER_POWERUP
+and does not by itself establish a modem crash.

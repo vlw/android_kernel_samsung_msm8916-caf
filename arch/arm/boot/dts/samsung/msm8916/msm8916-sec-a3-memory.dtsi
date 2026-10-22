@@ -1,12 +1,12 @@
 /*
- * A3 memory sizes from the SM-A300F stock device tree. Keep these overrides
- * separate from the common Samsung layout used by other MSM8916 devices.
+ * A3-specific multimedia CMA and persistent logging layout.
+ *
+ * Keep external_image_mem at the common 0x85500000..0x867fffff reservation.
+ * The smaller 0x85a00000/14-MiB layout exposes bootloader-protected RAM:
+ * SM-A300F A300FXXS1BRH1 rejects MMC DMA to 0x85800000, aborting ext4's
+ * journal and remounting /data read-only during boot. A stock DTS from a
+ * different firmware cannot establish the active TrustZone protection map.
  */
-
-&external_image_mem {
-	/* Stock TIMA/TZ reservation ends at the unchanged modem base. */
-	reg = <0x0 0x85a00000 0x0 0x00e00000>;
-};
 
 &secure_mem {
 	/* Stock protected-multimedia CMA capacity: 50 MiB. */
