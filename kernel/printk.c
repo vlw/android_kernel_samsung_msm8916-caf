@@ -275,8 +275,8 @@ static u32 clear_idx;
 #define LOG_MAGIC 0x4d474f4c /* "LOGM" */
 
 /* These variables are also protected by logbuf_lock */
-static unsigned *sec_log_ptr;
-static char *sec_log_buf;
+static u32 __iomem *sec_log_ptr;
+static char __iomem *sec_log_buf;
 static unsigned sec_log_size;
 
 
@@ -288,9 +288,8 @@ static bool sec_log_reserved;
  * we will have new design of kloginfo()
  * ready.
  */
-static unsigned sec_log_end;
 unsigned sec_log_reserve_size;
-unsigned int *sec_log_irq_en;
+unsigned int __iomem *sec_log_irq_en;
 
 #define LAST_LOG_BUF_SHIFT 19
 static char *last_kmsg_buffer;
@@ -2018,13 +2017,33 @@ asmlinkage int printk_emit(int facility, int level,
 }
 EXPORT_SYMBOL(printk_emit);
 
-static inline void emit_sec_log_char(char c)
+/* Called with logbuf_lock held. Commit the position after the payload. */
+static void sec_log_write(const char *text, unsigned int count)
 {
-	if (sec_log_buf && sec_log_ptr) {
-		sec_log_end++;
-		sec_log_buf[*sec_log_ptr & (sec_log_size - 1)] = c;
-		(*sec_log_ptr)++;
+	u32 pos, end;
+	unsigned int first, offset;
+
+	if (!count)
+		return;
+	pos = readl(sec_log_ptr);
+	end = pos + count;
+	/* Preserve the full-ring indication when the legacy 32-bit count wraps.
+	 * Its low bits still identify the next byte for stock readers.
+	 */
+	if (end < pos)
+		end = sec_log_size + (end & (sec_log_size - 1));
+	if (count > sec_log_size) {
+		text += count - sec_log_size;
+		pos += count - sec_log_size;
+		count = sec_log_size;
 	}
+	offset = pos & (sec_log_size - 1);
+	first = min(count, sec_log_size - offset);
+	memcpy_toio(sec_log_buf + offset, text, first);
+	if (first < count)
+		memcpy_toio(sec_log_buf, text + first, count - first);
+	wmb();
+	writel(end, sec_log_ptr);
 }
 
 static void sec_log_add(const struct log *msg)
@@ -2032,20 +2051,24 @@ static void sec_log_add(const struct log *msg)
 	static char tmp[1024];
 	static unsigned char prev_flag;
 	int size = 0;
-	int i;
+
+	/* Initialization publishes the mapping only while holding logbuf_lock. */
+	if (!sec_log_buf)
+		return;
 
 	size = msg_print_text(msg, prev_flag, true, tmp, 1024);
 	prev_flag = msg->flags;
-	for (i = 0; i < size; i++)
-		emit_sec_log_char(tmp[i]);
+	sec_log_write(tmp, size);
 }
 
 static void sec_log_add_on_bootup(void)
 {
 	u32 current_idx = log_first_idx;
+	u64 seq;
 	struct log *msg;
 
-	while (current_idx < log_next_idx) {
+	/* Byte offsets wrap; record sequence numbers determine how much to copy. */
+	for (seq = log_first_seq; seq < log_next_seq; seq++) {
 		msg = log_from_idx(current_idx, true);
 		sec_log_add(msg);
 		current_idx = log_next(current_idx, true);
@@ -2062,25 +2085,31 @@ void sec_debug_subsys_set_kloginfo(unsigned int *first_idx_paddr,
 	*size = __LOG_BUF_LEN;
 }
 
-static int __init sec_log_save_old(void)
+static int __init sec_log_save_old(const char __iomem *buffer,
+				 const u32 __iomem *write_ptr,
+				 unsigned int size)
 {
-	/* provide previous log as last_kmsg */
-	last_kmsg_size =
-	    min((unsigned)(1 << LAST_LOG_BUF_SHIFT), *sec_log_ptr);
-	last_kmsg_buffer = kmalloc(last_kmsg_size, GFP_KERNEL);
+	u32 end = readl(write_ptr);
+	unsigned int count, offset, first;
+	char *snapshot;
 
-	if (last_kmsg_size && last_kmsg_buffer && sec_log_buf) {
-		unsigned int i;
-		for (i = 0; i < last_kmsg_size; i++)
-			last_kmsg_buffer[i] =
-			    sec_log_buf[(*sec_log_ptr - last_kmsg_size +
-					 i) & (sec_log_size - 1)];
-		return 1;
-	} else {
-		/* Never publish a nonzero proc size backed by a NULL buffer. */
-		last_kmsg_size = 0;
+	/* No live writer has access to this mapping yet. Do not allocate or
+	 * copy potentially 512 KiB while holding the IRQ-disabling log lock.
+	 */
+	count = min(end, min(size, (unsigned int)(1 << LAST_LOG_BUF_SHIFT)));
+	if (!count)
 		return 0;
-	}
+	snapshot = kmalloc(count, GFP_KERNEL);
+	if (!snapshot)
+		return -ENOMEM;
+	offset = (end - count) & (size - 1);
+	first = min(count, size - offset);
+	memcpy_fromio(snapshot, buffer + offset, first);
+	if (first < count)
+		memcpy_fromio(snapshot + first, buffer, count - first);
+	last_kmsg_buffer = snapshot;
+	last_kmsg_size = count;
+	return 1;
 }
 
 /* Called by the board reserve hook before the linear RAM mapping is built.
@@ -2111,7 +2140,7 @@ void __init sec_log_reserve(void)
 static int __init printk_remap_nocache(void)
 {
 	void __iomem *nocache_base = 0;
-	unsigned *sec_log_mag;
+	u32 __iomem *sec_log_mag, *write_ptr;
 	unsigned long flags;
 	int rc = 0;
 	int bOk = 0;
@@ -2141,7 +2170,7 @@ static int __init printk_remap_nocache(void)
 
 	if (!nocache_base) {
 		pr_err("Failed to remap nocache log region\n");
-		return rc;
+		return -ENOMEM;
 	}
 
 #ifdef CONFIG_ARM_LPAE
@@ -2156,29 +2185,33 @@ static int __init printk_remap_nocache(void)
 	nocache_base = nocache_base + 12;
 
 	sec_log_mag = nocache_base - 8;
-	sec_log_ptr = nocache_base - 4;
-	sec_log_buf = nocache_base;
-	sec_log_size = sec_log_save_size;
-	sec_log_irq_en = nocache_base - 0xC;
+	write_ptr = nocache_base - 4;
 
-	if (*sec_log_mag != LOG_MAGIC) {
-		*sec_log_ptr = 0;
-		*sec_log_mag = LOG_MAGIC;
+	if (readl(sec_log_mag) != LOG_MAGIC) {
+		writel(0, write_ptr);
+		wmb();
+		writel(LOG_MAGIC, sec_log_mag);
 	} else {
-		bOk = sec_log_save_old();
+		bOk = sec_log_save_old(nocache_base, write_ptr,
+				       sec_log_save_size);
 	}
 
 	raw_spin_lock_irqsave(&logbuf_lock, flags);
+	sec_log_ptr = write_ptr;
+	sec_log_size = sec_log_save_size;
+	sec_log_irq_en = nocache_base - 12;
+	sec_log_buf = nocache_base;
 	/*We have to save logs printed prior to
 	the sec log initialization here.*/
 	sec_log_add_on_bootup();
 	raw_spin_unlock_irqrestore(&logbuf_lock, flags);
-	if (bOk) {
+	if (bOk > 0) {
 		pr_info("%s: saved old log at %d@%p\n",
 			__func__, last_kmsg_size, last_kmsg_buffer);
+	} else if (bOk < 0) {
+		pr_warn("sec_log: could not allocate previous-boot snapshot\n");
 	} else {
-		pr_err("%s: failed saving old log %d@%p\n",
-	       __func__, last_kmsg_size, last_kmsg_buffer);
+		pr_info("sec_log: no previous-boot log\n");
 	}
 	return rc;
 }
@@ -2241,7 +2274,7 @@ static int __init sec_log_setup(char *str)
 		unsigned long long base = 0;
 
 		ret = kstrtoull(++str, 0, &base);
-		if (ret || base < 12 || (phys_addr_t)base != base ||
+		if (ret || base < 12 || (base & 3) || (phys_addr_t)base != base ||
 		    (phys_addr_t)(base + size) <= base)
 			return -EINVAL;
 

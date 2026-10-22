@@ -1,0 +1,65 @@
+Samsung sec_log correctness fixes
+================================
+
+sec_log and ramoops are independent persistent RAM loggers. The former hooks
+printk's record insertion and exposes a snapshot through /proc/last_kmsg; the
+latter is the pstore backend. Neither the physical reservation nor the data
+format is shared. See a3-pstore.txt for ramoops. These changes retain the
+Samsung buffer address, LOG_MAGIC and the legacy 32-bit position word.
+
+Earlier fix 96536f86387f reserves the page-rounded metadata and payload before
+ARM's linear RAM mapping. This avoids allocating the region as ordinary RAM
+or creating a cached alias. It also fixes the mapped extent and the invalid
+last_kmsg size on snapshot allocation failure. Those protections remain.
+
+Remaining defects corrected here
+---------------------------------
+The old initializer published sec_log_buf/sec_log_ptr before allocating and
+copying the old log. Normal printk writers, including allocator diagnostics,
+could therefore modify the same ring during snapshot creation. Initialization
+now keeps the mapping private, reads the old position once, and copies the
+old tail with at most two memcpy_fromio operations. The snapshot is limited
+to both physical ring capacity and LAST_LOG_BUF_SHIFT. Allocation and copying
+run with interrupts enabled, outside logbuf_lock.
+
+After the old snapshot is complete (or allocation fails), initialization takes
+logbuf_lock, installs all writer state, and replays pending printk records.
+Writers use that same lock, so they cannot observe partially installed state
+or alter the previous-boot snapshot. Printks arriving during preparation stay
+in the regular printk ring and are included in replay, subject to that ring's
+normal retention limit. OOM while saving last_kmsg does not disable live logs.
+Mapping failure returns an error and leaves the logger disabled. An absent
+previous log is informational rather than a false boot error.
+
+Boot replay previously compared physical byte offsets. These offsets wrap
+and are not an ordering relation. Replay now advances from log_first_seq to
+log_next_seq while using the existing log_from_idx/log_next wrap helpers.
+
+Each formatted record previously read/updated the uncached position for each
+character. Recording now reads it once, copies the payload in at most two
+segments, orders those writes with wmb, and commits the new position once via
+writel. The disabled logger returns before formatting the record. Explicit
+MMIO accessors and __iomem annotations replace ordinary pointer accesses.
+Snapshot copying no longer repeatedly reads the moving position word.
+
+On 32-bit counter overflow, the position is normalized to one full ring plus
+its physical offset. Its low bits and the legacy reader's full-ring meaning
+are preserved; a full buffer must not appear empty after 4 GiB of logging.
+The boot argument parser rejects unaligned buffer bases before 32-bit MMIO.
+
+Validation and limits
+----------------------
+Run: python3 tools/testing/selftests/pstore/sec_log_test.py
+ASan/UBSan cover actual production function bodies, the actual printk index
+helpers, private snapshot/publication ordering, a simulated concurrent printk
+during allocation, map/OOM failures, snapshot caps, wrapped printk replay,
+5000 persistent-ring writes, zero/oversized writes, counter overflow/recovery
+and data-before-position ordering. MMIO, locking and formatting are host test
+doubles: this is not an ARM cache-coherency or bootloader-retention test.
+The original replay loop fails the wrapped-ring regression case.
+
+The native a3lte zImage-dtb build also passes. Diagnostics are saved under
+out/gps-diagnostics/2026-10-22/pstore/sec-log-*.log. No device writes, panic or
+reboot are necessary for these source/build tests. sec_log retains its legacy
+format without ECC and may end in an incomplete line if reset during a write.
+The changes do not claim to prove the cause of every historical random fault.
