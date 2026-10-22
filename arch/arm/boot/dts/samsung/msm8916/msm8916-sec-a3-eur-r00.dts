@@ -14,6 +14,7 @@
 
 #include "msm8916-sec-a3-eur-r00.dtsi"
 #include "msm8916-memory.dtsi"
+#include "msm8916-sec-a3-memory.dtsi"
 
 / {
 	model = "Samsung A3 EUR PROJECT Rev00";

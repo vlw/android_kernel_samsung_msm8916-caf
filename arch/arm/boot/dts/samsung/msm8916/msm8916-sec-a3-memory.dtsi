@@ -1,0 +1,18 @@
+/*
+ * A3 memory sizes from the SM-A300F stock device tree. Keep these overrides
+ * separate from the common Samsung layout used by other MSM8916 devices.
+ */
+
+&external_image_mem {
+	/* Stock TIMA/TZ reservation ends at the unchanged modem base. */
+	reg = <0x0 0x85a00000 0x0 0x00e00000>;
+};
+
+&secure_mem {
+	/* Stock protected-multimedia CMA capacity: 50 MiB. */
+	reg = <0 0 0 0x03200000>;
+};
+
+/* Retain mba_mem: the current PIL loader uses this dedicated CMA pool for
+ * modem authentication. It is reusable CMA, not permanently removed RAM.
+ */
