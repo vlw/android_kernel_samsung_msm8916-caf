@@ -232,10 +232,9 @@ void mdss_xlog_tout_handler(const char *name, ...)
 
 	mdss_samsung_dsi_te_check();
 
-	if(dead)
-		panic(name);
 #endif
 
+	/* Samsung dumps must honor the same explicit panic switch as CAF. */
 	if (dead && mdd->logd.panic_on_err)
 		panic(name);
 }
