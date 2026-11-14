@@ -1533,6 +1533,14 @@ static long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	{
 		struct ion_handle *handle;
 
+		/*
+		 * PIL heaps are carved out of RAM owned by running remote
+		 * processors. Zeroing it from Linux faults on the XPU and
+		 * corrupts the subsystem, so userspace must never get it.
+		 */
+		data.allocation.heap_id_mask &= ~(ION_HEAP(ION_PIL1_HEAP_ID) |
+						  ION_HEAP(ION_PIL2_HEAP_ID));
+
 		handle = __ion_alloc(client, data.allocation.len,
 						data.allocation.align,
 						data.allocation.heap_id_mask,
