@@ -702,15 +702,17 @@ static int msm_isp_send_hw_cmd(struct vfe_device *vfe_dev,
 	case VFE_READ_DMI_64BIT: {
 		if (reg_cfg_cmd->cmd_type == VFE_WRITE_DMI_64BIT ||
 	            reg_cfg_cmd->cmd_type == VFE_READ_DMI_64BIT) {
-			if ((reg_cfg_cmd->u.dmi_info.hi_tbl_offset <=
-				reg_cfg_cmd->u.dmi_info.lo_tbl_offset) ||
-				(reg_cfg_cmd->u.dmi_info.hi_tbl_offset -
-				reg_cfg_cmd->u.dmi_info.lo_tbl_offset !=
-				(sizeof(uint32_t)))) {
+			/*
+			 * Words are interleaved in pairs, so hi may sit right
+			 * before or right after lo; the stock A3 ISP module
+			 * sends hi first.
+			 */
+			uint32_t hi = reg_cfg_cmd->u.dmi_info.hi_tbl_offset;
+			uint32_t lo = reg_cfg_cmd->u.dmi_info.lo_tbl_offset;
+
+			if ((hi > lo ? hi - lo : lo - hi) != sizeof(uint32_t)) {
 				pr_err("%s:%d hi %d lo %d\n",
-					__func__, __LINE__,
-					reg_cfg_cmd->u.dmi_info.hi_tbl_offset,
-					reg_cfg_cmd->u.dmi_info.hi_tbl_offset);
+					__func__, __LINE__, hi, lo);
 				return -EINVAL;
 			}
 			if (reg_cfg_cmd->u.dmi_info.len <= sizeof(uint32_t)) {
