@@ -115,6 +115,13 @@ struct f2fs_mount_info {
 #define F2FS_FEATURE_ENCRYPT	0x0001
 #define F2FS_FEATURE_BLKZONED	0x0002
 
+/*
+ * Every feature bit this driver can handle. Newer on-disk features (extra_attr,
+ * inode_checksum, compression, ...) change the inode layout, so a filesystem
+ * carrying any other bit must not be mounted at all, not even read-only.
+ */
+#define F2FS_FEATURE_SUPPORTED	(F2FS_FEATURE_ENCRYPT | F2FS_FEATURE_BLKZONED)
+
 #define F2FS_HAS_FEATURE(sb, mask)					\
 	((F2FS_SB(sb)->raw_super->feature & cpu_to_le32(mask)) != 0)
 #define F2FS_SET_FEATURE(sb, mask)					\

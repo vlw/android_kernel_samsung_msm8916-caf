@@ -1428,6 +1428,14 @@ static int sanity_check_raw_super(struct f2fs_sb_info *sbi,
 		return 1;
 	}
 
+	if (le32_to_cpu(raw_super->feature) & ~F2FS_FEATURE_SUPPORTED) {
+		f2fs_msg(sb, KERN_ERR,
+			"Unsupported features (0x%x), refusing to mount",
+			le32_to_cpu(raw_super->feature) &
+						~F2FS_FEATURE_SUPPORTED);
+		return 1;
+	}
+
 	/* Currently, support only 4KB page cache size */
 	if (F2FS_BLKSIZE != PAGE_SIZE) {
 		f2fs_msg(sb, KERN_INFO,
